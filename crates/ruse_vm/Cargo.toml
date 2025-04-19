@@ -1,0 +1,8 @@
+[package]
+name = "ruse_vm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+num = "0.4.3"
+ruse_core = { path = "../ruse_core" }
