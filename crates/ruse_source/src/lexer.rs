@@ -2,9 +2,9 @@ use crate::token::{Span, Token, TokenKind};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{char, hex_digit1, satisfy};
-use nom::combinator::{recognize, value};
+use nom::combinator::{map, recognize, value};
 use nom::multi::many0;
-use nom::sequence::pair;
+use nom::sequence::{pair, preceded, terminated};
 use nom::{IResult, Parser};
 use nom_locate::LocatedSpan;
 use thiserror::Error;
@@ -78,10 +78,10 @@ fn parse_identifier(source: LocatedSpan<&str>) -> IResult<Span, Token> {
 }
 
 fn identifier_init_subsequent(source: LocatedSpan<&str>) -> IResult<Span, Span> {
-    recognize(pair(identifier_initial, many0(subsequent))).parse(source)
+    recognize(pair(initial, many0(subsequent))).parse(source)
 }
 
-fn identifier_initial(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+fn initial(source: LocatedSpan<&str>) -> IResult<Span, Span> {
     recognize(satisfy(|c| {
         matches!(
             c,
@@ -108,7 +108,7 @@ fn identifier_initial(source: LocatedSpan<&str>) -> IResult<Span, Span> {
 }
 
 fn subsequent(source: LocatedSpan<&str>) -> IResult<Span, Span> {
-    recognize(alt((identifier_initial, digit, special_subsequent))).parse(source)
+    recognize(alt((initial, digit, special_subsequent))).parse(source)
 }
 
 fn digit(source: LocatedSpan<&str>) -> IResult<Span, Span> {
@@ -116,7 +116,12 @@ fn digit(source: LocatedSpan<&str>) -> IResult<Span, Span> {
 }
 
 fn special_subsequent(source: LocatedSpan<&str>) -> IResult<Span, Span> {
-    recognize(alt((identifier_initial, digit, explicit_sign))).parse(source)
+    recognize(alt((
+        explicit_sign,
+        recognize(char('.')),
+        recognize(char('@')),
+    )))
+    .parse(source)
 }
 
 fn explicit_sign(source: LocatedSpan<&str>) -> IResult<Span, Span> {
@@ -128,11 +133,11 @@ fn identifier_symbol_element(source: LocatedSpan<&str>) -> IResult<Span, Span> {
 }
 
 fn symbol_element(source: LocatedSpan<&str>) -> IResult<Span, Span> {
-    recognize(alt((
+    alt((
         recognize(satisfy(|c| c != '|' && c != '\\')),
-        inline_hex_escape,
+        recognize(inline_hex_escape),
         mnemonic_escape,
-    )))
+    ))
     .parse(source)
 }
 
@@ -140,8 +145,15 @@ fn vertical_line(source: LocatedSpan<&str>) -> IResult<Span, Span> {
     recognize(satisfy(|c| c == '|')).parse(source)
 }
 
-fn inline_hex_escape(source: LocatedSpan<&str>) -> IResult<Span, Span> {
-    recognize((tag(r#"\x"#), hex_digit1)).parse(source)
+fn inline_hex_escape(source: LocatedSpan<&str>) -> IResult<Span, char> {
+    preceded(
+        tag(r"\x"),
+        map(terminated(hex_digit1, char(';')), |hex: Span| {
+            let code = u32::from_str_radix(hex.fragment(), 16).unwrap();
+            std::char::from_u32(code).unwrap()
+        }),
+    )
+    .parse(source)
 }
 
 fn mnemonic_escape(source: LocatedSpan<&str>) -> IResult<Span, Span> {
@@ -157,17 +169,17 @@ fn mnemonic_escape(source: LocatedSpan<&str>) -> IResult<Span, Span> {
 
 fn identifier_peculiar(source: LocatedSpan<&str>) -> IResult<Span, Span> {
     alt((
-        recognize(explicit_sign),
         recognize((explicit_sign, sign_subsequent, many0(subsequent))),
         recognize((explicit_sign, char('.'), dot_subsequent, many0(subsequent))),
         recognize((char('.'), dot_subsequent, many0(subsequent))),
+        recognize(explicit_sign),
     ))
     .parse(source)
 }
 
 fn sign_subsequent(source: LocatedSpan<&str>) -> IResult<Span, Span> {
     alt((
-        recognize(identifier_initial),
+        recognize(initial),
         recognize(explicit_sign),
         recognize(char('@')),
     ))
@@ -255,8 +267,22 @@ mod tests {
 
         for id in identifiers {
             let result = parse_identifier(id.into());
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap().1.kind, TokenKind::Identifier(id.into()))
+            assert!(
+                result.is_ok(),
+                "parsing '{}' resulted in an error: {:?}",
+                id,
+                result
+            );
+
+            let (remaining, output) = result.unwrap();
+
+            assert_eq!(
+                output.kind,
+                TokenKind::Identifier(id.into()),
+                "should have captured entire identifier '{}'",
+                id
+            );
+            assert_eq!(remaining.fragment(), &"");
         }
     }
 }
