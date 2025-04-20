@@ -1,9 +1,11 @@
 use crate::token::{Span, Token, TokenKind};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::{char, hex_digit1, satisfy};
-use nom::combinator::{map, recognize, value};
-use nom::multi::many0;
+use nom::character::complete::{
+    bin_digit1, char, digit1, hex_digit1, oct_digit1, satisfy,
+};
+use nom::combinator::{map, opt, recognize, value};
+use nom::multi::{many0, many1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::{IResult, Parser};
 use nom_locate::LocatedSpan;
@@ -191,7 +193,87 @@ fn dot_subsequent(source: LocatedSpan<&str>) -> IResult<Span, Span> {
 }
 
 fn parse_number(source: LocatedSpan<&str>) -> IResult<Span, Token> {
-    todo!();
+    todo!()
+    let (remaining, result) = recognize(alt((num2, num8, num10, num16))).parse(source)?;
+
+    Ok((
+        remaining,
+        Token {
+            kind: TokenKind::Number(result.fragment()),
+            span: result,
+        },
+    ))
+}
+
+enum Radix {
+    R2,
+    R8,
+    R10,
+    R16,
+}
+
+impl Radix {
+    pub fn parser(self) -> fn(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+        match self {
+            Radix::R2 => radix2,
+            Radix::R8 => radix8,
+            Radix::R10 => radix10,
+            Radix::R16 => radix16,
+        }
+    }
+}
+
+fn infnan(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    alt((tag("+inf.0"), tag("-inf.0"), tag("+nan.0"), tag("-nan.0"))).parse(source)
+}
+
+fn uinteger_r(radix: Radix, source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    let mut digit_parser = match radix {
+        Radix::R2 => bin_digit1,
+        Radix::R8 => oct_digit1,
+        Radix::R10 => digit1,
+        Radix::R16 => hex_digit1,
+    };
+
+    digit_parser.parse(source)
+}
+
+fn prefix_r(radix: Radix, source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    let radix_parser = radix.parser();
+
+    recognize(alt(((radix_parser, exactness), (exactness, radix_parser)))).parse(source)
+}
+
+fn suffix(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    recognize(opt((exponent_marker, sign, many1(digit)))).parse(source)
+}
+
+fn exponent_marker(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    recognize(char('e')).parse(source)
+}
+
+fn sign(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    recognize(opt(alt((char('+'), char('-'))))).parse(source)
+}
+
+fn exactness(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    recognize(opt(alt((tag("#i"), tag("#e"))))).parse(source)
+}
+
+fn radix2(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    recognize(tag("#b")).parse(source)
+}
+
+fn radix8(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    recognize(tag("#o")).parse(source)
+}
+
+fn radix10(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    recognize(opt(tag("#d"))).parse(source)
+}
+
+fn radix16(source: LocatedSpan<&str>) -> IResult<Span, Span> {
+    recognize(tag("#x")).parse(source)
 }
 
 fn parse_character(source: LocatedSpan<&str>) -> IResult<Span, Token> {
