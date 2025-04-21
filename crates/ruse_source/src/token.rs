@@ -76,7 +76,9 @@ pub enum TokenKind<'a> {
     // --- Directives ---
     /// A directive indicator, like `# !`. Often followed by an identifier token.
     /// Examples: `# !fold-case`, `# !no-fold-case`.
-    SharpBang,
+    /// There are only two directives named by the R7RS.
+    DirectiveFoldCase,
+    DirectiveNoFoldCase,
 
     // --- End of Input ---
     /// Special token indicating the end of the input stream has been reached.
