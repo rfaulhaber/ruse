@@ -8,7 +8,7 @@ use nom::character::one_of;
 use nom::combinator::{consumed, map, opt, recognize, value};
 use nom::multi::{many0, many1};
 use nom::sequence::{pair, preceded, separated_pair, terminated};
-use nom::{IResult, Parser};
+use nom::{AsChar, IResult, Parser};
 use nom_locate::LocatedSpan;
 use thiserror::Error;
 
@@ -93,9 +93,17 @@ fn basic_token(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
 fn identifier(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
     let (remaining, output) = recognize(alt((
         preceded(
-            one_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!$%&*/:<=>?@^_~.+-"),
-            take_while(|c| !is_delimeter(c)),
+            satisfy(|c| c.is_alphabetic() || is_special_initial(c)),
+            take_while(|c: char| c.is_alphanumeric()),
         ),
+        recognize(separated_pair(
+            one_of("+-"),
+            satisfy(|c| c.is_alphabetic() || is_special_initial(c)),
+            take_while(|c: char| match c {
+                '+' | '-' | '.' | '@' => true,
+                c => c.is_alphanumeric() || is_special_initial(c),
+            }),
+        )),
         recognize(separated_pair(char('|'), is_not("|"), char('|'))),
     )))
     .parse(source)?;
@@ -110,7 +118,18 @@ fn identifier(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
 }
 
 fn number(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
-    todo!();
+    let (remaining, output) = alt((
+        tag("+inf.0"),
+        tag("-inf.0"),
+        tag("+nan.0"),
+        tag("-nan.0"),
+        recognize(separated_pair(digit1, char('.'), digit1)),
+        recognize(preceded(one_of("+-"), digit1)),
+        digit1,
+    ))
+    .parse(source)?;
+
+    Ok((remaining, (output, TokenKind::Number(output.fragment()))))
 }
 
 fn character(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
@@ -118,7 +137,13 @@ fn character(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
 }
 
 fn string(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
-    todo!()
+    let (remaining, output) =
+        recognize(separated_pair(char('"'), is_not("\""), char('"'))).parse(source)?;
+
+    Ok((
+        remaining,
+        (output, TokenKind::String((*output.fragment()).into())),
+    ))
 }
 
 fn datum_label_define(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
@@ -134,6 +159,13 @@ fn is_delimeter(c: char) -> bool {
         '|' | '(' | ')' | '"' | ';' => true,
         c => c.is_whitespace(),
     }
+}
+
+fn is_special_initial(c: char) -> bool {
+    matches!(
+        c,
+        '!' | '$' | '%' | '*' | '/' | ':' | '<' | '=' | '>' | '?' | '@' | '^' | '_' | '~'
+    )
 }
 
 #[cfg(test)]
