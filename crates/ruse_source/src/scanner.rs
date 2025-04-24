@@ -6,6 +6,7 @@ type ScanOutput<'s> = (usize, &'s str);
 /// A scanner that iterates over a Scheme source string, yielding slices
 /// representing potential tokens (like identifiers, literals, delimiters).
 /// It skips whitespace and comments.
+#[derive(Debug)]
 pub struct Scanner<'s> {
     source: &'s str,
     chars: Peekable<CharIndices<'s>>,

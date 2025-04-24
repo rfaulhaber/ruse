@@ -1,39 +1,49 @@
-use std::borrow::Cow;
-
-use crate::token::{Span, Token, TokenKind};
-use nom::branch::alt;
-use nom::bytes::complete::{is_not, tag, take_till, take_until, take_while, take_while1};
-use nom::character::complete::{bin_digit1, char, digit0, digit1, hex_digit1, oct_digit1, satisfy};
-use nom::character::one_of;
-use nom::combinator::{consumed, map, opt, recognize, value};
-use nom::multi::{many0, many1};
-use nom::sequence::{pair, preceded, separated_pair, terminated};
-use nom::{AsChar, IResult, Parser};
+use nom::{
+    branch::alt,
+    bytes::complete::{is_not, tag, take_while1},
+    character::complete::{char, digit1, one_of},
+    combinator::{opt, recognize},
+    sequence::{pair, separated_pair},
+    IResult, Parser,
+};
 use nom_locate::LocatedSpan;
 use thiserror::Error;
 
+use crate::{
+    scanner::Scanner,
+    token::{Token, TokenKind},
+};
+
 pub type LexerResult<'l> = Result<Token<'l>, LexerError>;
+
+type Span<'s> = LocatedSpan<&'s str>;
 
 #[derive(Debug, Error)]
 pub enum LexerError {}
 
 #[derive(Debug)]
 pub struct Lexer<'l> {
-    source: LocatedSpan<&'l str>,
+    scanner: Scanner<'l>,
 }
 
 impl<'l> Iterator for Lexer<'l> {
     type Item = LexerResult<'l>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        match self.scanner.next() {
+            Some((pos, item)) => match item {
+                "(" => todo!(),
+                _ => todo!(),
+            },
+            _ => todo!(),
+        }
     }
 }
 
 impl<'l> From<&'l str> for Lexer<'l> {
     fn from(value: &'l str) -> Self {
         Self {
-            source: LocatedSpan::new(value),
+            scanner: Scanner::new(value),
         }
     }
 }
@@ -41,7 +51,7 @@ impl<'l> From<&'l str> for Lexer<'l> {
 impl<'l> Lexer<'l> {
     pub fn new<I: Into<LocatedSpan<&'l str>>>(source: I) -> Self {
         Self {
-            source: source.into(),
+            scanner: Scanner::new(&source.into()),
         }
     }
 
@@ -51,57 +61,30 @@ impl<'l> Lexer<'l> {
 }
 
 fn recognize_token(source: LocatedSpan<&str>) -> IResult<Span, Token> {
-    let (remaining, (output, token_kind)) = alt((
-        number,
-        identifier,
-        string,
-        datum_label_ref,
-        datum_label_define,
-        basic_token,
-        character,
-    ))
-    .parse(source)?;
-
-    Ok((
-        remaining,
-        Token {
-            kind: token_kind,
-            span: output,
-        },
-    ))
+    todo!()
 }
 
-fn basic_token(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
-    consumed(alt((
-        value(TokenKind::LParen, char('(')),
-        value(TokenKind::RParen, char(')')),
-        value(TokenKind::VectorStart, tag("#(")),
-        value(TokenKind::BytevectorStart, tag("#u8(")),
-        value(TokenKind::Dot, char('.')),
-        value(TokenKind::QuoteTick, char('\'')),
-        value(TokenKind::QuasiquoteTick, char('`')),
-        value(TokenKind::UnquoteSplicing, tag(",@")),
-        value(TokenKind::UnquoteTick, char(',')),
-        value(TokenKind::BooleanTrue, alt((tag("#true"), tag("#t")))),
-        value(TokenKind::BooleanFalse, alt((tag("#false"), tag("#f")))),
-        value(TokenKind::DirectiveFoldCase, tag("#!fold-case")),
-        value(TokenKind::DirectiveNoFoldCase, tag("#!no-fold-case")),
-    )))
-    .parse(source)
-}
+// fn basic_token(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
+//     consumed(alt((
+//         value(TokenKind::LParen, char('(')),
+//         value(TokenKind::RParen, char(')')),
+//         value(TokenKind::VectorStart, tag("#(")),
+//         value(TokenKind::BytevectorStart, tag("#u8(")),
+//         value(TokenKind::Dot, char('.')),
+//         value(TokenKind::QuoteTick, char('\'')),
+//         value(TokenKind::QuasiquoteTick, char('`')),
+//         value(TokenKind::UnquoteSplicing, tag(",@")),
+//         value(TokenKind::UnquoteTick, char(',')),
+//         value(TokenKind::BooleanTrue, alt((tag("#true"), tag("#t")))),
+//         value(TokenKind::BooleanFalse, alt((tag("#false"), tag("#f")))),
+//         value(TokenKind::DirectiveFoldCase, tag("#!fold-case")),
+//         value(TokenKind::DirectiveNoFoldCase, tag("#!no-fold-case")),
+//     )))
+//     .parse(source)
+// }
 
 fn identifier(source: LocatedSpan<&str>) -> IResult<Span, (Span, TokenKind)> {
-    let (remaining, output) = alt((
-        identifier_initial_subsequent,
-        identifier_vertical_line,
-        identifier_peculiar,
-    ))
-    .parse(source)?;
-
-    Ok((
-        remaining,
-        (output, TokenKind::Identifier(Cow::from(*output.fragment()))),
-    ))
+    todo!()
 }
 
 fn identifier_initial_subsequent(source: LocatedSpan<&str>) -> IResult<Span, Span> {
