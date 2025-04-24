@@ -43,9 +43,9 @@ mod tests {
         let input = "one\ntwo\nthree";
 
         let line_map = LineMap::new(input);
-        let one_span = Span::new("one", 0, 2);
-        let two_span = Span::new("two", 4, 3);
-        let three_span = Span::new("three", 8, 12);
+        let one_span = Span::new("one", 0);
+        let two_span = Span::new("two", 4);
+        let three_span = Span::new("three", 8);
 
         assert_eq!(line_map.line_col(one_span), (1, 1));
         assert_eq!(line_map.line_col(two_span), (2, 1));
