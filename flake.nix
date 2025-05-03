@@ -4,6 +4,10 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs @ {flake-parts, ...}: let
@@ -24,6 +28,7 @@
         self',
         config,
         pkgs,
+        system,
         ...
       }: {
         formatter = pkgs.alejandra;
@@ -39,13 +44,6 @@
 
         packages.default = self'.packages.${projectName};
 
-        apps.${projectName} = {
-          type = "app";
-          program = self'.packages.${projectName};
-        };
-
-        apps.default = self'.apps.${projectName};
-
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             cargo
@@ -54,6 +52,7 @@
             clippy
             rust-analyzer
             rustup
+            cargo-nextest
           ];
         };
       };
