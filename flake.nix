@@ -10,7 +10,11 @@
     };
   };
 
-  outputs = inputs @ {flake-parts, ...}: let
+  outputs = inputs @ {
+    self,
+    flake-parts,
+    ...
+  }: let
     projectName = "ruse";
   in
     flake-parts.lib.mkFlake {inherit inputs;} (top @ {
@@ -19,6 +23,7 @@
       moduleWithSystem,
       ...
     }: {
+      flake.overlays.rustOverlay = inputs.rust-overlay.overlays.default;
       systems = [
         "x86_64-linux"
         "aarch64-darwin"
@@ -31,6 +36,13 @@
         system,
         ...
       }: {
+        _module.args.pkgs = import inputs.nixpkgs {
+          inherit system;
+          overlays = [
+            self.overlays.rustOverlay
+          ];
+        };
+
         formatter = pkgs.alejandra;
 
         packages.${projectName} = pkgs.rustPlatform.buildRustPackage {
@@ -46,12 +58,9 @@
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            cargo
-            rustc
-            rustfmt
+            rust-bin.stable.latest.default
             clippy
             rust-analyzer
-            rustup
             cargo-nextest
           ];
         };
