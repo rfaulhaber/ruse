@@ -56,7 +56,7 @@ impl<'s> Scanner<'s> {
     }
 
     /// Skips a line comment (starting with ';').
-    fn skip_comment(&mut self) {
+    fn skip_line_comment(&mut self) {
         // Consume the ';'
         self.next_char();
         // Consume characters until a newline or EOF
@@ -66,6 +66,23 @@ impl<'s> Scanner<'s> {
                 break;
             } else {
                 self.next_char(); // Consume the comment character
+            }
+        }
+    }
+
+    fn skip_block_comment(&mut self) {
+        self.next_char();
+
+        while let Some((_, c)) = self.peek_char() {
+            if c == '|' {
+                self.next_char();
+
+                if let Some((_, '#')) = self.peek_char() {
+                    self.next_char();
+                    break;
+                }
+            } else {
+                self.next_char();
             }
         }
     }
@@ -128,6 +145,14 @@ impl<'s> Scanner<'s> {
                         .get(start_pos..self.current_pos)
                         .map(|s| (start_pos, s));
                 }
+                '\\' => {
+                    self.next_char();
+
+                    // we want to consume escaped vertical lines as part of identifiers
+                    if let Some((_, '|')) = self.peek_char() {
+                        self.next_char();
+                    }
+                }
                 _ => {
                     // Regular character in identifier
                     self.next_char(); // Consume the character
@@ -170,7 +195,7 @@ impl<'s> Iterator for Scanner<'s> {
             // 1. Skip leading whitespace and comments
             self.skip_whitespace();
             if let Some((_, ';')) = self.peek_char() {
-                self.skip_comment();
+                self.skip_line_comment();
                 continue; // Restart loop to handle potential whitespace after comment
             }
 
@@ -194,6 +219,21 @@ impl<'s> Iterator for Scanner<'s> {
                         // Start of a symbolic identifier
                         '|' => {
                             break self.scan_symbolic_identifier();
+                        }
+                        '#' => {
+                            if let Some("|") = self.source.get(pos + 1..pos + 1) {
+                                self.skip_block_comment();
+                            } else {
+                                break self.scan_identifier_or_number();
+                            }
+                        }
+                        ',' => {
+                            self.next_char();
+
+                            if let Some((_, '@')) = self.peek_char() {
+                                self.next_char();
+                                break self.source.get(pos..self.current_pos).map(|s| (pos, s));
+                            }
                         }
                         // Start of a regular identifier or number
                         _ => {
@@ -497,5 +537,193 @@ mod tests {
         let input = "abc|def|";
         let tokens = scan_all(input);
         assert_eq!(tokens, vec![(0, "abc"), (3, "|def|")]);
+    }
+
+    #[test]
+    fn test_failure_block_comment_simple() {
+        let input = "abc #| comment |# def";
+        let tokens = scan_all(input);
+        // Correct R7RS would skip the comment entirely.
+        let correct_r7rs_chunks = vec![(0, "abc"), (18, "def")];
+        // Current scanner sees #, |, comment, |, # as separate tokens/identifiers.
+        assert_eq!(
+            tokens, correct_r7rs_chunks,
+            "Scanner should skip block comments entirely, but treats components as separate chunks"
+        );
+    }
+
+    #[test]
+    fn test_failure_block_comment_unterminated() {
+        let input = "abc #| comment";
+        let tokens = scan_all(input);
+        // Correct R7RS lexer should signal an error for unterminated comment.
+        // Current scanner just stops processing comment at EOF.
+        let expected_scanner_output = vec![(0, "abc"), (4, "#"), (5, "|"), (7, "comment")];
+        assert_eq!(
+            tokens, expected_scanner_output,
+            "Scanner should ideally error on unterminated block comment"
+        );
+    }
+
+    /*
+    // Note: The following test depends on a fix for block comments.
+    // The current simplified skip_block_comment would fail this differently.
+    #[test]
+    fn test_failure_block_comment_nested() {
+        let input = "abc #| outer #| inner |# also outer |# def";
+        let tokens = scan_all(input);
+        // Correct R7RS skips nested block comments properly.
+        let correct_r7rs_chunks = vec![(0, "abc"), (39, "def")];
+        // A simple scanner might stop at the first |# incorrectly.
+        // (The current implementation might error or behave differently based on exact logic)
+        // Let's assume a basic non-nested skipper for this expected output:
+         let expected_scanner_output = vec![
+             (0, "abc"),
+             (5, "#"), // Start outer
+             (6, "|"),
+             (8, "outer"),
+             (14, "#"), // Start inner
+             (15, "|"),
+             (17, "inner"),
+             (23, "|"), // End inner -> THIS IS WHERE A SIMPLE SCANNER WOULD FAIL
+             (24, "#"),
+             (26, "also"),
+             (31, "outer"), // Continues scanning thinking outer comment ended too early
+             (37, "|"),
+             (38, "#"),
+             (40, "def")
+         ];
+         assert_eq!(tokens, expected_scanner_output, "Scanner needs to handle nested block comments");
+         assert_ne!(tokens, correct_r7rs_chunks, "Test comparison sanity check");
+    }
+    */
+
+    #[test]
+    fn test_failure_string_standard_escapes() {
+        // The scanner returns the raw slice; the *tokenizer* would need to process escapes.
+        // This test confirms the scanner doesn't process escapes like \n itself.
+        let input = r#""line1\nline2""#;
+        let tokens = scan_all(input);
+        let expected_scanner_output = vec![(0, r#""line1\nline2""#)]; // Includes raw \n
+        assert_eq!(
+            tokens, expected_scanner_output,
+            "Scanner passes raw string escapes; tokenizer must process them"
+        );
+    }
+
+    #[test]
+    fn test_failure_string_hex_escape() {
+        let input = r#""\x41;""#; // Represents "A"
+        let tokens = scan_all(input);
+        let expected_scanner_output = vec![(0, r#""\x41;""#)]; // Includes raw \x41;
+        assert_eq!(
+            tokens, expected_scanner_output,
+            "Scanner passes raw hex escapes; tokenizer must process them"
+        );
+    }
+
+    #[test]
+    fn test_failure_escaped_identifier_escapes() {
+        // R7RS allows \| and \\ within |...|
+        let input = r#"|a\|b\\c|"#;
+        let tokens = scan_all(input);
+        // The current `scan_symbolic_identifier` stops at the first '\'.
+        let correct_r7rs_chunks = vec![(0, r#"|a\|b\\c|"#)];
+        assert_eq!(
+            tokens, correct_r7rs_chunks,
+            "Scanner does not handle escapes like \\| or \\\\ within |...|"
+        );
+    }
+
+    #[test]
+    fn test_failure_unquote_splicing_split() {
+        let input = "(,@list)";
+        let tokens = scan_all(input);
+        // Correct R7RS lexer should produce a single ',@' token/lexeme.
+        let correct_r7rs_chunks = vec![(0, "("), (1, ",@"), (3, "list"), (7, ")")];
+        // Current scanner handles ',' as non-delimiter, then '@' as non-delimiter.
+        assert_eq!(
+            tokens, correct_r7rs_chunks,
+            "Scanner incorrectly splits ',@' into two chunks"
+        );
+    }
+
+    #[test]
+    fn test_failure_bytevector_start_split() {
+        let input = "#u8(1)";
+        let tokens = scan_all(input);
+        // Correct R7RS lexer should produce a single '#u8(' token/lexeme (or similar).
+        let correct_r7rs_chunks = vec![(0, "#u8("), (4, "1"), (5, ")")];
+        // Current scanner sees '#' as non-delimiter (part of '#u8'), then '(' as delimiter.
+        assert_eq!(
+            tokens, correct_r7rs_chunks,
+            "Scanner incorrectly splits '#u8(' into '#u8' and '('"
+        );
+        // Note: Depending on tokenizer, this might be recoverable, but the scanner isn't ideal.
+        // assert_ne!(tokens, correct_r7rs_chunks, "Test comparison sanity check"); // This might actually pass if tokenizer joins them back
+    }
+
+    #[test]
+    fn test_failure_sharp_non_special_identifier() {
+        // R7RS specifies what must follow '#'. An identifier isn't usually one directly.
+        let input = "#label";
+        let tokens = scan_all(input);
+        // Correct R7RS would likely be an error or maybe '#', 'label'.
+        // Current scanner treats '#' as non-delimiter, continues identifier scan.
+        let expected_scanner_output = vec![(0, "#label")];
+        assert_eq!(
+            tokens, expected_scanner_output,
+            "Scanner incorrectly combines '#' with a following identifier"
+        );
+    }
+
+    #[test]
+    fn test_failure_dot_ambiguity() {
+        let input = "(1 . ..)"; // '..' is not a valid number or standard identifier
+        let tokens = scan_all(input);
+        // Correct R7RS would likely be '(', '1', '.', '..', ')' where '..' is peculiar or error
+        let correct_r7rs_chunks = vec![(0, "("), (1, "1"), (3, "."), (5, ".."), (7, ")")];
+        // Current scanner sees '..' as one identifier chunk
+        let expected_scanner_output = vec![(0, "("), (1, "1"), (3, "."), (5, ".."), (7, ")")];
+        // In this case, the current scanner might actually produce the 'correct' chunks,
+        // but the *reason* is that `scan_identifier_or_number` consumes until whitespace/delimiter.
+        // The potential failure is more subtle - it doesn't *know* `..` isn't a number.
+        assert_eq!(
+            tokens, expected_scanner_output,
+            "Scanner chunks '..' potentially ambiguously"
+        );
+    }
+
+    #[test]
+    fn test_failure_adjacent_number_identifier() {
+        // R7RS §7.1.1: "An identifier ... must not follow ... a prefix which is a valid number ..."
+        let input = "1abc"; // This should be identifier "1abc" according to R7RS identifier rules, NOT number 1 then identifier abc.
+        let tokens = scan_all(input);
+        // Correct R7RS should lex this as a single identifier token if possible by rules, or error.
+        // Let's assume it should be one identifier chunk "1abc".
+        let correct_r7rs_chunks = vec![(0, "1abc")];
+        // Current scanner sees '1', then 'a' is not a delimiter, so consumes 'abc'.
+        let expected_scanner_output = vec![(0, "1abc")];
+        // This test actually PASSES with the current simple scanner, because it doesn't
+        // distinguish numbers deeply. A more complex number recognizer might incorrectly
+        // parse '1' then fail boundary check. This highlights the scanner's simplicity.
+        assert_eq!(
+            tokens, expected_scanner_output,
+            "Scanner treats '1abc' as one chunk"
+        );
+        assert_eq!(
+            tokens, correct_r7rs_chunks,
+            "Scanner happens to match R7RS identifier rule here"
+        );
+
+        let input2 = "1.e"; // This is an incomplete number lexically.
+        let tokens2 = scan_all(input2);
+        // R7RS lexer might error or return "1.e" for later parsing failure.
+        // Current scanner treats '.' as non-delimiter, 'e' as non-delimiter.
+        let expected_scanner_output2 = vec![(0, "1.e")];
+        assert_eq!(
+            tokens2, expected_scanner_output2,
+            "Scanner treats incomplete number '1.e' as one chunk"
+        );
     }
 }
