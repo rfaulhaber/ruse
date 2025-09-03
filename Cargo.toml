@@ -1,7 +1,7 @@
 [package]
 name = "ruse"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [[bin]]
 name = "ruse"
@@ -11,3 +11,5 @@ path = "main.rs"
 path = "lib.rs"
 
 [dependencies]
+miette = { version = "7", features = ["fancy"] }
+thiserror = "1"

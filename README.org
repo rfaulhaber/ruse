@@ -1,0 +1,5 @@
+#+title: Ruse
+
+Ryan's Useful Scheme Experiment: A set of R7RS implementations.
+
+The r7rs can be found [[https://github.com/johnwcowan/r7rs-spec/blob/errata/spec/r7rs.pdf][here]].

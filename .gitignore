@@ -1,3 +1,6 @@
 /target
 .direnv
 .envrc
+
+rust_out
+.claude
