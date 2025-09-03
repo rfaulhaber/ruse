@@ -5,9 +5,9 @@ edition = "2021"
 
 [[bin]]
 name = "ruse"
-path = "src/main.rs"
+path = "main.rs"
 
-[workspace]
-members = [".", "ruse_vm"]
+[lib]
+path = "lib.rs"
 
 [dependencies]
