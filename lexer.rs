@@ -1,6 +1,7 @@
 use crate::span::{Span, SourceFile};
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -49,6 +50,11 @@ pub struct Lexer {
     position: usize,
     line: usize,
     column: usize,
+    intern_cache: HashMap<String, String>, // Simple string interning for identifiers
+}
+
+pub struct TokenIterator {
+    lexer: Lexer,
 }
 
 impl Lexer {
@@ -58,6 +64,7 @@ impl Lexer {
             position: 0,
             line: 1,
             column: 1,
+            intern_cache: HashMap::new(),
         }
     }
     
@@ -67,6 +74,7 @@ impl Lexer {
             position: 0,
             line: 1,
             column: 1,
+            intern_cache: HashMap::new(),
         }
     }
 
@@ -83,6 +91,10 @@ impl Lexer {
         }
         
         Ok(tokens)
+    }
+    
+    pub fn into_iter(self) -> TokenIterator {
+        TokenIterator { lexer: self }
     }
 
     pub fn next_token(&mut self) -> Result<Token, LexError> {
@@ -137,9 +149,11 @@ impl Lexer {
         };
         
         let start_pos = self.position - c.len_utf8();
+        let lexeme = Self::token_lexeme(&kind);
+        
         Ok(Token {
             kind,
-            lexeme: c.to_string(),
+            lexeme,
             span: Span::new(start_pos, self.position),
             line: start_line,
             column: start_column,
@@ -331,11 +345,12 @@ impl Lexer {
             self.advance();
         }
         
-        let lexeme = &self.source.content[start_pos..self.position];
+        let lexeme = self.source.content[start_pos..self.position].to_string();
+        let interned = self.intern_string(&lexeme);
         
         Ok(Token {
-            kind: TokenKind::Identifier(lexeme.to_string()),
-            lexeme: lexeme.to_string(),
+            kind: TokenKind::Identifier(interned.clone()),
+            lexeme: interned,
             span: Span::new(start_pos, self.position),
             line: start_line,
             column: start_column,
@@ -436,6 +451,50 @@ impl Lexer {
 
     fn is_identifier_subsequent(&self, c: char) -> bool {
         self.is_identifier_start(c) || c.is_ascii_digit()
+    }
+    
+    fn intern_string(&mut self, s: &str) -> String {
+        // Check if we've seen this string before
+        if let Some(interned) = self.intern_cache.get(s) {
+            interned.clone()
+        } else {
+            let owned = s.to_string();
+            self.intern_cache.insert(owned.clone(), owned.clone());
+            owned
+        }
+    }
+    
+    fn token_lexeme(kind: &TokenKind) -> String {
+        match kind {
+            TokenKind::LeftParen => "(".to_string(),
+            TokenKind::RightParen => ")".to_string(),
+            TokenKind::LeftBracket => "[".to_string(),
+            TokenKind::RightBracket => "]".to_string(),
+            TokenKind::Quote => "'".to_string(),
+            TokenKind::Quasiquote => "`".to_string(),
+            TokenKind::Dot => ".".to_string(),
+            TokenKind::Unquote => ",".to_string(),
+            TokenKind::UnquoteSplicing => ",@".to_string(),
+            TokenKind::Eof => "".to_string(),
+            _ => String::new(), // Will be set elsewhere for complex tokens
+        }
+    }
+}
+
+impl Iterator for TokenIterator {
+    type Item = Result<Token, LexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.lexer.next_token() {
+            Ok(token) => {
+                if token.kind == TokenKind::Eof {
+                    None
+                } else {
+                    Some(Ok(token))
+                }
+            }
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 

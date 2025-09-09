@@ -4,12 +4,9 @@ pub mod ast;
 pub mod parser;
 
 pub use span::{Span, SourceFile};
-pub use lexer::{Lexer, Token, TokenKind, LexError};
+pub use lexer::{Lexer, Token, TokenKind, LexError, TokenIterator};
 pub use ast::Expr;
-pub use parser::{Parser, ParseError};
-
-// Re-export miette types for convenience
-pub use miette::{SourceSpan, NamedSource, Result as MietteResult};
+pub use parser::{Parser, ParseError, StreamingParser};
 
 #[cfg(test)]
 mod tests {

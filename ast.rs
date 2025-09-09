@@ -60,6 +60,83 @@ impl Expr {
     pub fn is_symbol(&self) -> bool {
         matches!(self, Expr::Symbol(_, _))
     }
+    
+    /// Find the expression that contains the given position
+    pub fn find_at_position(&self, pos: usize) -> Option<&Expr> {
+        if !self.span().contains(pos) {
+            return None;
+        }
+        
+        // For atoms, return self
+        if self.is_atom() {
+            return Some(self);
+        }
+        
+        // For compound expressions, recursively search
+        match self {
+            Expr::List(elements, _) => {
+                for expr in elements {
+                    if let Some(found) = expr.find_at_position(pos) {
+                        return Some(found);
+                    }
+                }
+                Some(self) // Position is in the list but not in any element
+            }
+            Expr::DottedList(elements, tail, _) => {
+                for expr in elements {
+                    if let Some(found) = expr.find_at_position(pos) {
+                        return Some(found);
+                    }
+                }
+                if let Some(found) = tail.find_at_position(pos) {
+                    return Some(found);
+                }
+                Some(self)
+            }
+            Expr::Quote(expr, _) | 
+            Expr::Quasiquote(expr, _) | 
+            Expr::Unquote(expr, _) | 
+            Expr::UnquoteSplicing(expr, _) => {
+                if let Some(found) = expr.find_at_position(pos) {
+                    Some(found)
+                } else {
+                    Some(self)
+                }
+            }
+            _ => Some(self),
+        }
+    }
+    
+    /// Get all symbols referenced in this expression
+    pub fn collect_symbols(&self) -> Vec<&str> {
+        let mut symbols = Vec::new();
+        self.collect_symbols_recursive(&mut symbols);
+        symbols
+    }
+    
+    fn collect_symbols_recursive<'a>(&'a self, symbols: &mut Vec<&'a str>) {
+        match self {
+            Expr::Symbol(s, _) => symbols.push(s),
+            Expr::List(elements, _) => {
+                for expr in elements {
+                    expr.collect_symbols_recursive(symbols);
+                }
+            }
+            Expr::DottedList(elements, tail, _) => {
+                for expr in elements {
+                    expr.collect_symbols_recursive(symbols);
+                }
+                tail.collect_symbols_recursive(symbols);
+            }
+            Expr::Quote(expr, _) | 
+            Expr::Quasiquote(expr, _) | 
+            Expr::Unquote(expr, _) | 
+            Expr::UnquoteSplicing(expr, _) => {
+                expr.collect_symbols_recursive(symbols);
+            }
+            _ => {} // Atoms other than symbols don't contribute
+        }
+    }
 }
 
 impl fmt::Display for Expr {
