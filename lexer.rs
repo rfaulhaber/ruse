@@ -57,6 +57,16 @@ pub struct TokenIterator {
     lexer: Lexer,
 }
 
+impl std::iter::IntoIterator for Lexer {
+    type Item = <TokenIterator as Iterator>::Item;
+
+    type IntoIter = TokenIterator;
+
+    fn into_iter(self) -> TokenIterator {
+        TokenIterator { lexer: self }
+    }
+}
+
 impl Lexer {
     pub fn new(input: &str) -> Self {
         Self {
@@ -93,10 +103,6 @@ impl Lexer {
         Ok(tokens)
     }
 
-    pub fn into_iter(self) -> TokenIterator {
-        TokenIterator { lexer: self }
-    }
-
     pub fn next_token(&mut self) -> Result<Token, LexError> {
         self.skip_whitespace_and_comments();
 
@@ -123,7 +129,7 @@ impl Lexer {
             '\'' => TokenKind::Quote,
             '`' => TokenKind::Quasiquote,
             '.' => {
-                if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     return self.number_starting_with_dot();
                 }
                 TokenKind::Dot
@@ -139,7 +145,7 @@ impl Lexer {
             '"' => return self.string(),
             '#' => return self.hash_syntax(),
             _ if c.is_ascii_digit()
-                || (c == '-' && self.peek().map_or(false, |p| p.is_ascii_digit())) =>
+                || (c == '-' && self.peek().is_some_and(|p| p.is_ascii_digit())) =>
             {
                 return self.number();
             }
@@ -196,7 +202,7 @@ impl Lexer {
                 }
                 Some(';') => {
                     // Skip line comment
-                    while self.peek().map_or(false, |c| c != '\n') {
+                    while self.peek().is_some_and(|c| c != '\n') {
                         self.advance();
                     }
                 }
@@ -277,7 +283,7 @@ impl Lexer {
         }
 
         // Consume digits
-        while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
         }
 
@@ -287,7 +293,7 @@ impl Lexer {
         if self.peek() == Some('.') {
             is_float = true;
             self.advance();
-            while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.advance();
             }
         }
@@ -299,7 +305,7 @@ impl Lexer {
             if matches!(self.peek(), Some('+') | Some('-')) {
                 self.advance();
             }
-            while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.advance();
             }
         }
@@ -335,7 +341,7 @@ impl Lexer {
         let start_pos = self.position - 1;
 
         // Consume digits after dot
-        while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
         }
 
@@ -361,7 +367,7 @@ impl Lexer {
 
         while self
             .peek()
-            .map_or(false, |c| self.is_identifier_subsequent(c))
+            .is_some_and(|c| self.is_identifier_subsequent(c))
         {
             self.advance();
         }

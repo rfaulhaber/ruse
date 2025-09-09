@@ -3,28 +3,9 @@ use crate::lexer::{LexError, Lexer, Token, TokenKind};
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
 
-#[derive(Debug, Clone)]
-pub struct ParserConfig {
-    pub allow_extra_closing_parens: bool,
-    pub recover_from_errors: bool,
-    pub max_nesting_depth: usize,
-}
-
-impl Default for ParserConfig {
-    fn default() -> Self {
-        Self {
-            allow_extra_closing_parens: false,
-            recover_from_errors: false,
-            max_nesting_depth: 1000,
-        }
-    }
-}
-
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
-    config: ParserConfig,
-    nesting_depth: usize,
 }
 
 pub struct StreamingParser<I>
@@ -41,17 +22,6 @@ impl Parser {
         Self {
             tokens,
             current: 0,
-            config: ParserConfig::default(),
-            nesting_depth: 0,
-        }
-    }
-
-    pub fn with_config(tokens: Vec<Token>, config: ParserConfig) -> Self {
-        Self {
-            tokens,
-            current: 0,
-            config,
-            nesting_depth: 0,
         }
     }
 
