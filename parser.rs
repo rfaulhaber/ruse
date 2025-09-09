@@ -19,10 +19,7 @@ where
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self {
-            tokens,
-            current: 0,
-        }
+        Self { tokens, current: 0 }
     }
 
     pub fn parse_from_str(input: &str) -> Result<Vec<Expr>, ParseError> {
