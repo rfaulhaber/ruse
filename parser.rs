@@ -45,7 +45,7 @@ impl Parser {
             nesting_depth: 0,
         }
     }
-    
+
     pub fn with_config(tokens: Vec<Token>, config: ParserConfig) -> Self {
         Self {
             tokens,
@@ -80,7 +80,7 @@ impl Parser {
         let mut parser = StreamingParser::new(lexer.into_iter());
         parser.parse()
     }
-    
+
     /// Parse with error recovery - returns partial results even if some expressions fail
     pub fn parse_with_recovery(input: &str) -> (Vec<Expr>, Vec<ParseError>) {
         let mut lexer = Lexer::new(input);
@@ -88,16 +88,16 @@ impl Parser {
             Ok(tokens) => tokens,
             Err(lex_err) => return (Vec::new(), vec![ParseError::LexError(lex_err)]),
         };
-        
+
         let mut parser = Parser::new(tokens);
         let mut expressions = Vec::new();
         let mut errors = Vec::new();
-        
+
         while !parser.is_at_end() {
             if parser.check(&TokenKind::Eof) {
                 break;
             }
-            
+
             match parser.expression() {
                 Ok(expr) => expressions.push(expr),
                 Err(err) => {
@@ -107,19 +107,24 @@ impl Parser {
                 }
             }
         }
-        
+
         (expressions, errors)
     }
-    
+
     /// Attempt to recover from parse errors by finding the next likely expression start
     fn recover_to_next_expression(&mut self) {
         while !self.is_at_end() {
             match self.peek().kind {
-                TokenKind::LeftParen | TokenKind::LeftBracket | 
-                TokenKind::Quote | TokenKind::Quasiquote |
-                TokenKind::Integer(_) | TokenKind::Number(_) |
-                TokenKind::String(_) | TokenKind::Character(_) |
-                TokenKind::Boolean(_) | TokenKind::Identifier(_) => {
+                TokenKind::LeftParen
+                | TokenKind::LeftBracket
+                | TokenKind::Quote
+                | TokenKind::Quasiquote
+                | TokenKind::Integer(_)
+                | TokenKind::Number(_)
+                | TokenKind::String(_)
+                | TokenKind::Character(_)
+                | TokenKind::Boolean(_)
+                | TokenKind::Identifier(_) => {
                     // Found a potential start of an expression
                     break;
                 }
@@ -207,15 +212,28 @@ impl Parser {
             _ => {
                 let context = "atom expression";
                 let suggestion = match token.kind {
-                    TokenKind::LeftParen => "This looks like the start of a list - atoms cannot start with '('".to_string(),
-                    TokenKind::RightParen => "Unexpected closing parenthesis - check for unmatched delimiters".to_string(),
-                    TokenKind::LeftBracket => "This looks like the start of a list - atoms cannot start with '['".to_string(),
-                    TokenKind::RightBracket => "Unexpected closing bracket - check for unmatched delimiters".to_string(),
-                    TokenKind::Dot => "Dots can only appear in dotted lists like (a . b)".to_string(),
+                    TokenKind::LeftParen => {
+                        "This looks like the start of a list - atoms cannot start with '('"
+                            .to_string()
+                    }
+                    TokenKind::RightParen => {
+                        "Unexpected closing parenthesis - check for unmatched delimiters"
+                            .to_string()
+                    }
+                    TokenKind::LeftBracket => {
+                        "This looks like the start of a list - atoms cannot start with '['"
+                            .to_string()
+                    }
+                    TokenKind::RightBracket => {
+                        "Unexpected closing bracket - check for unmatched delimiters".to_string()
+                    }
+                    TokenKind::Dot => {
+                        "Dots can only appear in dotted lists like (a . b)".to_string()
+                    }
                     TokenKind::Eof => "Unexpected end of file".to_string(),
                     _ => format!("'{}' cannot be used as an atom here", token.lexeme),
                 };
-                
+
                 Err(ParseError::UnexpectedToken {
                     lexeme: token.lexeme.clone(),
                     context: context.to_string(),
@@ -258,12 +276,16 @@ impl Parser {
         } else {
             let token = self.peek();
             let suggestion = match kind {
-                TokenKind::RightParen => "Add a ')' to close the list or check for extra opening parentheses".to_string(),
-                TokenKind::RightBracket => "Add a ']' to close the list or check for extra opening brackets".to_string(),
+                TokenKind::RightParen => {
+                    "Add a ')' to close the list or check for extra opening parentheses".to_string()
+                }
+                TokenKind::RightBracket => {
+                    "Add a ']' to close the list or check for extra opening brackets".to_string()
+                }
                 TokenKind::LeftParen => "Expected '(' to start a list".to_string(),
                 _ => format!("Expected '{}' here", Self::token_kind_name(&kind)),
             };
-            
+
             Err(ParseError::Expected {
                 message: message.to_string(),
                 lexeme: token.lexeme.clone(),
@@ -272,7 +294,7 @@ impl Parser {
             })
         }
     }
-    
+
     fn token_kind_name(kind: &TokenKind) -> &'static str {
         match kind {
             TokenKind::LeftParen => "(",
@@ -359,7 +381,8 @@ where
             if self.check(&TokenKind::Dot)? {
                 self.advance()?; // consume dot
                 let tail = self.expression()?;
-                let end_token = self.consume(closing_kind, "Expected closing delimiter after dotted list")?;
+                let end_token =
+                    self.consume(closing_kind, "Expected closing delimiter after dotted list")?;
                 let span = open_token.span.merge(end_token.span);
                 return Ok(Expr::DottedList(elements, Box::new(tail), span));
             }
@@ -384,15 +407,28 @@ where
             _ => {
                 let context = "atom expression";
                 let suggestion = match token.kind {
-                    TokenKind::LeftParen => "This looks like the start of a list - atoms cannot start with '('".to_string(),
-                    TokenKind::RightParen => "Unexpected closing parenthesis - check for unmatched delimiters".to_string(),
-                    TokenKind::LeftBracket => "This looks like the start of a list - atoms cannot start with '['".to_string(),
-                    TokenKind::RightBracket => "Unexpected closing bracket - check for unmatched delimiters".to_string(),
-                    TokenKind::Dot => "Dots can only appear in dotted lists like (a . b)".to_string(),
+                    TokenKind::LeftParen => {
+                        "This looks like the start of a list - atoms cannot start with '('"
+                            .to_string()
+                    }
+                    TokenKind::RightParen => {
+                        "Unexpected closing parenthesis - check for unmatched delimiters"
+                            .to_string()
+                    }
+                    TokenKind::LeftBracket => {
+                        "This looks like the start of a list - atoms cannot start with '['"
+                            .to_string()
+                    }
+                    TokenKind::RightBracket => {
+                        "Unexpected closing bracket - check for unmatched delimiters".to_string()
+                    }
+                    TokenKind::Dot => {
+                        "Dots can only appear in dotted lists like (a . b)".to_string()
+                    }
                     TokenKind::Eof => "Unexpected end of file".to_string(),
                     _ => format!("'{}' cannot be used as an atom here", token.lexeme),
                 };
-                
+
                 Err(ParseError::UnexpectedToken {
                     lexeme: token.lexeme.clone(),
                     context: context.to_string(),
@@ -416,7 +452,7 @@ where
             let token = self.next_token()?;
             self.peeked.push(token);
         }
-        
+
         if self.peeked.is_empty() {
             // Return EOF token
             self.peeked.push(Token {
@@ -427,7 +463,7 @@ where
                 column: 0,
             });
         }
-        
+
         Ok(&self.peeked[0])
     }
 
@@ -475,12 +511,16 @@ where
         } else {
             let token = self.peek()?.clone();
             let suggestion = match kind {
-                TokenKind::RightParen => "Add a ')' to close the list or check for extra opening parentheses".to_string(),
-                TokenKind::RightBracket => "Add a ']' to close the list or check for extra opening brackets".to_string(),
+                TokenKind::RightParen => {
+                    "Add a ')' to close the list or check for extra opening parentheses".to_string()
+                }
+                TokenKind::RightBracket => {
+                    "Add a ']' to close the list or check for extra opening brackets".to_string()
+                }
                 TokenKind::LeftParen => "Expected '(' to start a list".to_string(),
                 _ => format!("Expected '{}' here", Parser::token_kind_name(&kind)),
             };
-            
+
             Err(ParseError::Expected {
                 message: message.to_string(),
                 lexeme: token.lexeme.clone(),
@@ -738,10 +778,10 @@ mod tests {
     #[test]
     fn test_streaming_vs_regular_parser() {
         let input = "'(define (factorial n) (if (= n 0) 1 (* n (factorial (- n 1)))))";
-        
+
         let regular = Parser::parse_from_str(input).unwrap();
         let streaming = Parser::parse_streaming_from_str(input).unwrap();
-        
+
         assert_eq!(regular.len(), streaming.len());
         assert_eq!(regular[0], streaming[0]);
     }
@@ -760,7 +800,11 @@ mod tests {
         // Test misplaced dot
         let err = Parser::parse_from_str(". 42").unwrap_err();
         match err {
-            ParseError::UnexpectedToken { suggestion, context, .. } => {
+            ParseError::UnexpectedToken {
+                suggestion,
+                context,
+                ..
+            } => {
                 assert!(suggestion.contains("Dots can only appear in dotted lists"));
                 assert_eq!(context, "atom expression");
             }
@@ -782,10 +826,10 @@ mod tests {
         // Test recovery from simple parsing errors
         let input = "42 ) 'valid (+ 1 2)"; // Extra closing paren
         let (exprs, errors) = Parser::parse_with_recovery(input);
-        
+
         assert!(exprs.len() >= 2); // Should recover and parse multiple expressions
         assert!(errors.len() >= 1); // Should have at least one error
-        
+
         assert!(matches!(exprs[0], Expr::Integer(42, _)));
     }
 
@@ -794,14 +838,14 @@ mod tests {
         let input = "(+ 1 (* 2 3))";
         let exprs = Parser::parse_from_str(input).unwrap();
         let expr = &exprs[0];
-        
+
         // Position 1 should find the "+" symbol
         if let Some(found) = expr.find_at_position(1) {
             assert!(matches!(found, Expr::Symbol(s, _) if s == "+"));
         } else {
             panic!("Should find symbol at position 1");
         }
-        
+
         // Position 5 should find the inner list (* 2 3)
         if let Some(found) = expr.find_at_position(5) {
             assert!(matches!(found, Expr::List(_, _)));
@@ -815,7 +859,7 @@ mod tests {
         let input = "(define (factorial n) (if (= n 0) 1 (* n (factorial (- n 1)))))";
         let exprs = Parser::parse_from_str(input).unwrap();
         let symbols = exprs[0].collect_symbols();
-        
+
         assert!(symbols.contains(&"define"));
         assert!(symbols.contains(&"factorial"));
         assert!(symbols.contains(&"n"));
