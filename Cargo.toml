@@ -12,4 +12,5 @@ path = "lib.rs"
 
 [dependencies]
 miette = { version = "7", features = ["fancy"] }
+rustyline = "17.0.2"
 thiserror = "1"
