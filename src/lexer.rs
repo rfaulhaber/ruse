@@ -132,6 +132,15 @@ impl Lexer {
                 if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     return self.number_starting_with_dot();
                 }
+                // A `.` followed by identifier characters is a peculiar identifier
+                // (e.g. the `...` ellipsis used by syntax-rules); a lone `.` is the
+                // dotted-pair marker.
+                if self
+                    .peek()
+                    .is_some_and(|c| self.is_identifier_subsequent(c))
+                {
+                    return self.identifier();
+                }
                 TokenKind::Dot
             }
             ',' => {
@@ -145,7 +154,7 @@ impl Lexer {
             '"' => return self.string(),
             '#' => return self.hash_syntax(),
             _ if c.is_ascii_digit()
-                || (c == '-' && self.peek().is_some_and(|p| p.is_ascii_digit())) =>
+                || ((c == '-' || c == '+') && self.peek().is_some_and(|p| p.is_ascii_digit())) =>
             {
                 return self.number();
             }
@@ -171,7 +180,11 @@ impl Lexer {
     }
 
     fn advance(&mut self) -> char {
-        let c = self.current_char().unwrap();
+        // Callers always check `is_at_end()` first, so `current_char()` is `Some` here;
+        // the `'\0'` fallback only guards against a logic error and never advances past EOF.
+        let Some(c) = self.current_char() else {
+            return '\0';
+        };
         self.position += c.len_utf8();
         if c == '\n' {
             self.line += 1;
@@ -277,12 +290,7 @@ impl Lexer {
         let start_column = self.column - 1;
         let start_pos = self.position - 1;
 
-        // Handle optional minus sign
-        if self.source.content[start_pos..].starts_with('-') {
-            // Already advanced past the minus
-        }
-
-        // Consume digits
+        // Consume digits (a leading sign was already consumed by the caller)
         while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
         }
@@ -707,5 +715,38 @@ mod tests {
         assert!(matches!(tokens[1].kind, TokenKind::Character('\t')));
         assert!(matches!(tokens[2].kind, TokenKind::Character(' ')));
         assert!(matches!(tokens[3].kind, TokenKind::Character('x')));
+    }
+
+    #[test]
+    fn test_lexer_positive_signed_numbers() {
+        let mut lexer = Lexer::new("+5 +1.5 -7 (+ 1 2)");
+        let tokens = lexer.tokenize().unwrap();
+
+        // `+5` / `+1.5` lex as numbers, not symbols...
+        assert!(matches!(tokens[0].kind, TokenKind::Integer(5)));
+        assert!(matches!(tokens[1].kind, TokenKind::Number(n) if (n - 1.5).abs() < f64::EPSILON));
+        assert!(matches!(tokens[2].kind, TokenKind::Integer(-7)));
+        // ...but a bare `+` (not followed by a digit) is still the addition identifier.
+        assert_eq!(tokens[3].kind, TokenKind::LeftParen);
+        assert!(matches!(tokens[4].kind, TokenKind::Identifier(ref s) if s == "+"));
+    }
+
+    #[test]
+    fn test_lexer_ellipsis_is_one_identifier() {
+        let mut lexer = Lexer::new("...");
+        let tokens = lexer.tokenize().unwrap();
+
+        // The `...` ellipsis is a single identifier token, not three `Dot`s.
+        assert_eq!(tokens.len(), 2); // identifier + EOF
+        assert!(matches!(tokens[0].kind, TokenKind::Identifier(ref s) if s == "..."));
+    }
+
+    #[test]
+    fn test_lexer_lone_dot_still_dot() {
+        let mut lexer = Lexer::new("(a . b)");
+        let tokens = lexer.tokenize().unwrap();
+
+        // A `.` delimited by whitespace remains the dotted-pair marker.
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Dot));
     }
 }

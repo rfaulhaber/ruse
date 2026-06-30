@@ -1,11 +1,25 @@
+// The restriction lints in Cargo.toml (`unwrap_used`, `expect_used`, `panic`) are meant
+// for library code paths; inside unit tests `unwrap`/`panic!` are the idiomatic way to
+// assert, so they are allowed in test builds only.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::approx_constant
+    )
+)]
+
 pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod span;
+pub mod vm;
 
 pub use ast::Expr;
 pub use lexer::{LexError, Lexer, Token, TokenIterator, TokenKind};
-pub use parser::{ParseError, Parser, StreamingParser};
+pub use parser::{ParseError, Parser};
 pub use span::{SourceFile, Span};
 
 #[cfg(test)]
@@ -22,7 +36,7 @@ mod tests {
         assert_eq!(exprs.len(), 1);
         // Verify it parsed as a list with 'define' as the first symbol
         if let Expr::List(ref elements, _) = exprs[0] {
-            assert!(elements.len() >= 1);
+            assert!(!elements.is_empty());
             if let Expr::Symbol(ref sym, _) = elements[0] {
                 assert_eq!(sym, "define");
             } else {

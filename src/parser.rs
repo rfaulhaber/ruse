@@ -8,15 +8,6 @@ pub struct Parser {
     current: usize,
 }
 
-pub struct StreamingParser<I>
-where
-    I: Iterator<Item = Result<Token, LexError>>,
-{
-    tokens: I,
-    peeked: Vec<Token>, // Lookahead buffer
-    eof_reached: bool,
-}
-
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, current: 0 }
@@ -40,12 +31,6 @@ impl Parser {
         }
 
         Ok(expressions)
-    }
-
-    pub fn parse_streaming_from_str(input: &str) -> Result<Vec<Expr>, ParseError> {
-        let lexer = Lexer::new(input);
-        let mut parser = StreamingParser::new(lexer.into_iter());
-        parser.parse()
     }
 
     /// Parse with error recovery - returns partial results even if some expressions fail
@@ -279,225 +264,6 @@ impl Parser {
     }
 }
 
-impl<I> StreamingParser<I>
-where
-    I: Iterator<Item = Result<Token, LexError>>,
-{
-    pub fn new(tokens: I) -> Self {
-        Self {
-            tokens,
-            peeked: Vec::new(),
-            eof_reached: false,
-        }
-    }
-
-    pub fn parse(&mut self) -> Result<Vec<Expr>, ParseError> {
-        let mut expressions = Vec::new();
-
-        while !self.is_at_end()? {
-            expressions.push(self.expression()?);
-        }
-
-        Ok(expressions)
-    }
-
-    fn expression(&mut self) -> Result<Expr, ParseError> {
-        let next = self.peek()?;
-        match &next.kind {
-            TokenKind::LeftParen | TokenKind::LeftBracket => self.list(),
-            TokenKind::Quote => {
-                let quote_token = self.advance()?;
-                let expr = self.expression()?;
-                let span = quote_token.span.merge(expr.span());
-                Ok(Expr::Quote(Box::new(expr), span))
-            }
-            TokenKind::Quasiquote => {
-                let quasi_token = self.advance()?;
-                let expr = self.expression()?;
-                let span = quasi_token.span.merge(expr.span());
-                Ok(Expr::Quasiquote(Box::new(expr), span))
-            }
-            TokenKind::Unquote => {
-                let unquote_token = self.advance()?;
-                let expr = self.expression()?;
-                let span = unquote_token.span.merge(expr.span());
-                Ok(Expr::Unquote(Box::new(expr), span))
-            }
-            TokenKind::UnquoteSplicing => {
-                let splice_token = self.advance()?;
-                let expr = self.expression()?;
-                let span = splice_token.span.merge(expr.span());
-                Ok(Expr::UnquoteSplicing(Box::new(expr), span))
-            }
-            _ => self.atom(),
-        }
-    }
-
-    fn list(&mut self) -> Result<Expr, ParseError> {
-        let open_token = self.advance()?;
-        let is_bracket = matches!(open_token.kind, TokenKind::LeftBracket);
-        let closing_kind = if is_bracket {
-            TokenKind::RightBracket
-        } else {
-            TokenKind::RightParen
-        };
-
-        let mut elements = Vec::new();
-
-        while !self.check(&closing_kind)? && !self.is_at_end()? {
-            if self.check(&TokenKind::Dot)? {
-                self.advance()?; // consume dot
-                let tail = self.expression()?;
-                let end_token =
-                    self.consume(closing_kind, "Expected closing delimiter after dotted list")?;
-                let span = open_token.span.merge(end_token.span);
-                return Ok(Expr::DottedList(elements, Box::new(tail), span));
-            }
-            elements.push(self.expression()?);
-        }
-
-        let close_token = self.consume(closing_kind, "Expected closing delimiter")?;
-        let span = open_token.span.merge(close_token.span);
-        Ok(Expr::List(elements, span))
-    }
-
-    fn atom(&mut self) -> Result<Expr, ParseError> {
-        let token = self.advance()?;
-
-        match token.kind {
-            TokenKind::Number(n) => Ok(Expr::Number(n, token.span)),
-            TokenKind::Integer(i) => Ok(Expr::Integer(i, token.span)),
-            TokenKind::String(s) => Ok(Expr::String(s, token.span)),
-            TokenKind::Character(c) => Ok(Expr::Character(c, token.span)),
-            TokenKind::Boolean(b) => Ok(Expr::Boolean(b, token.span)),
-            TokenKind::Identifier(s) => Ok(Expr::Symbol(s, token.span)),
-            _ => {
-                let context = "atom expression";
-                let suggestion = match token.kind {
-                    TokenKind::LeftParen => {
-                        "This looks like the start of a list - atoms cannot start with '('"
-                            .to_string()
-                    }
-                    TokenKind::RightParen => {
-                        "Unexpected closing parenthesis - check for unmatched delimiters"
-                            .to_string()
-                    }
-                    TokenKind::LeftBracket => {
-                        "This looks like the start of a list - atoms cannot start with '['"
-                            .to_string()
-                    }
-                    TokenKind::RightBracket => {
-                        "Unexpected closing bracket - check for unmatched delimiters".to_string()
-                    }
-                    TokenKind::Dot => {
-                        "Dots can only appear in dotted lists like (a . b)".to_string()
-                    }
-                    TokenKind::Eof => "Unexpected end of file".to_string(),
-                    _ => format!("'{}' cannot be used as an atom here", token.lexeme),
-                };
-
-                Err(ParseError::UnexpectedToken {
-                    lexeme: token.lexeme.clone(),
-                    context: context.to_string(),
-                    suggestion,
-                    span: SourceSpan::new(token.span.start.into(), token.span.len()),
-                })
-            }
-        }
-    }
-
-    fn advance(&mut self) -> Result<Token, ParseError> {
-        if self.peeked.is_empty() {
-            self.next_token()
-        } else {
-            Ok(self.peeked.remove(0))
-        }
-    }
-
-    fn peek(&mut self) -> Result<&Token, ParseError> {
-        if self.peeked.is_empty() && !self.eof_reached {
-            let token = self.next_token()?;
-            self.peeked.push(token);
-        }
-
-        if self.peeked.is_empty() {
-            // Return EOF token
-            self.peeked.push(Token {
-                kind: TokenKind::Eof,
-                lexeme: String::new(),
-                span: crate::span::Span::new(0, 0),
-                line: 0,
-                column: 0,
-            });
-        }
-
-        Ok(&self.peeked[0])
-    }
-
-    fn next_token(&mut self) -> Result<Token, ParseError> {
-        if self.eof_reached {
-            return Ok(Token {
-                kind: TokenKind::Eof,
-                lexeme: String::new(),
-                span: crate::span::Span::new(0, 0),
-                line: 0,
-                column: 0,
-            });
-        }
-
-        match self.tokens.next() {
-            Some(Ok(token)) => Ok(token),
-            Some(Err(err)) => Err(ParseError::LexError(err)),
-            None => {
-                self.eof_reached = true;
-                Ok(Token {
-                    kind: TokenKind::Eof,
-                    lexeme: String::new(),
-                    span: crate::span::Span::new(0, 0),
-                    line: 0,
-                    column: 0,
-                })
-            }
-        }
-    }
-
-    fn is_at_end(&mut self) -> Result<bool, ParseError> {
-        Ok(self.peek()?.kind == TokenKind::Eof)
-    }
-
-    fn check(&mut self, kind: &TokenKind) -> Result<bool, ParseError> {
-        if self.is_at_end()? {
-            return Ok(false);
-        }
-        Ok(std::mem::discriminant(&self.peek()?.kind) == std::mem::discriminant(kind))
-    }
-
-    fn consume(&mut self, kind: TokenKind, message: &str) -> Result<Token, ParseError> {
-        if self.check(&kind)? {
-            self.advance()
-        } else {
-            let token = self.peek()?.clone();
-            let suggestion = match kind {
-                TokenKind::RightParen => {
-                    "Add a ')' to close the list or check for extra opening parentheses".to_string()
-                }
-                TokenKind::RightBracket => {
-                    "Add a ']' to close the list or check for extra opening brackets".to_string()
-                }
-                TokenKind::LeftParen => "Expected '(' to start a list".to_string(),
-                _ => format!("Expected '{}' here", Parser::token_kind_name(&kind)),
-            };
-
-            Err(ParseError::Expected {
-                message: message.to_string(),
-                lexeme: token.lexeme.clone(),
-                suggestion,
-                span: SourceSpan::new(token.span.start.into(), token.span.len()),
-            })
-        }
-    }
-}
-
 #[derive(Error, Debug, Clone, Diagnostic)]
 pub enum ParseError {
     #[error(transparent)]
@@ -726,34 +492,6 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_parser() {
-        let exprs = Parser::parse_streaming_from_str("(+ 1 2) '(a b c)").unwrap();
-
-        assert_eq!(exprs.len(), 2);
-        if let Expr::List(elements, _) = &exprs[0] {
-            assert_eq!(elements.len(), 3);
-            assert!(matches!(&elements[0], Expr::Symbol(s, _) if s == "+"));
-            assert!(matches!(elements[1], Expr::Integer(1, _)));
-            assert!(matches!(elements[2], Expr::Integer(2, _)));
-        } else {
-            panic!("Expected list");
-        }
-
-        assert!(matches!(&exprs[1], Expr::Quote(_, _)));
-    }
-
-    #[test]
-    fn test_streaming_vs_regular_parser() {
-        let input = "'(define (factorial n) (if (= n 0) 1 (* n (factorial (- n 1)))))";
-
-        let regular = Parser::parse_from_str(input).unwrap();
-        let streaming = Parser::parse_streaming_from_str(input).unwrap();
-
-        assert_eq!(regular.len(), streaming.len());
-        assert_eq!(regular[0], streaming[0]);
-    }
-
-    #[test]
     fn test_improved_error_messages() {
         // Test unexpected token in atom context
         let err = Parser::parse_from_str("(").unwrap_err();
@@ -795,7 +533,7 @@ mod tests {
         let (exprs, errors) = Parser::parse_with_recovery(input);
 
         assert!(exprs.len() >= 2); // Should recover and parse multiple expressions
-        assert!(errors.len() >= 1); // Should have at least one error
+        assert!(!errors.is_empty()); // Should have at least one error
 
         assert!(matches!(exprs[0], Expr::Integer(42, _)));
     }

@@ -1,9 +1,9 @@
 {
-  description = "ruse";
+  description = "Rust flake template using rust-overlay and flake-parts.";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -15,24 +15,22 @@
     flake-parts,
     ...
   }: let
-    projectName = "ruse";
+    cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+    projectName = cargoToml.package.name;
   in
-    flake-parts.lib.mkFlake {inherit inputs;} (top @ {
-      config,
-      withSystem,
-      moduleWithSystem,
-      ...
-    }: {
+    flake-parts.lib.mkFlake {inherit inputs;} {
+      imports = [];
       flake.overlays.rustOverlay = inputs.rust-overlay.overlays.default;
       systems = [
         "x86_64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
         "aarch64-linux"
       ];
+
       perSystem = {
-        self',
         config,
+        self',
+        inputs',
         pkgs,
         system,
         ...
@@ -42,35 +40,30 @@
           overlays = [
             self.overlays.rustOverlay
           ];
-          config.allowUnfreePredicate = pkg:
-            builtins.elem (pkgs.lib.getName pkg) [
-              "claude-code"
-            ];
         };
 
         formatter = pkgs.alejandra;
 
-        packages.${projectName} = pkgs.rustPlatform.buildRustPackage {
-          pname = projectName;
-          version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-
-          meta.mainProgram = projectName;
+        packages = {
+          ${projectName} = pkgs.rustPlatform.buildRustPackage {
+            pname = projectName;
+            version = cargoToml.package.version;
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+          };
+          default = self'.packages.${projectName};
         };
 
-        packages.default = self'.packages.${projectName};
-
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            rust-bin.stable.latest.default
-            clippy
+          packages = with pkgs; [
+            (rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
             rust-analyzer
             cargo-nextest
-
-            claude-code
+            cargo-release
           ];
         };
       };
-    });
+
+      flake = {};
+    };
 }

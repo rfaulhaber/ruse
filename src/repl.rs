@@ -2,7 +2,7 @@ use miette::{NamedSource, Result};
 use ruse::Parser;
 use rustyline::DefaultEditor;
 
-fn main() -> Result<()> {
+pub fn start_repl() -> Result<()> {
     println!("Ruse - R7RS Scheme REPL");
     println!("Type expressions to parse them. Press Ctrl-D or Ctrl-C to exit.\n");
 
