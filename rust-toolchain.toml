@@ -1,3 +1,6 @@
 [toolchain]
-channel = "stable"
+# Pinned to an exact version rather than "stable": the CI clippy job runs with
+# `-D warnings`, so a new stable release can fail builds on commits that changed no
+# code. Bump deliberately, fixing any new lints in the same commit.
+channel = "1.97.1"
 components = ["clippy", "rustfmt"]

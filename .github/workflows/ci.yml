@@ -15,9 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The toolchain is pinned in rust-toolchain.toml, so a build matrix adds no signal.
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # setup-rust-toolchain reads rust-toolchain.toml, so the pinned version and its
+      # components are declared in exactly one place. It also handles caching, so no
+      # separate rust-cache step is needed.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: taiki-e/install-action@nextest
 
       - name: Check
@@ -38,10 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -51,9 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Rustfmt
         run: cargo fmt --all -- --check

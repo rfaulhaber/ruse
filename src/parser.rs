@@ -366,10 +366,10 @@ mod tests {
                 assert!(matches!(&inner1[0], Expr::Symbol(s, _) if s == "f"));
                 assert!(matches!(inner1[1], Expr::Integer(1, _)));
             } else {
-                panic!("Expected inner list, got {:?}", &outer[0]);
+                panic!("Expected inner list, got {:?}", outer[0]);
             }
         } else {
-            panic!("Expected outer list, got {:?}", &exprs[0]);
+            panic!("Expected outer list, got {:?}", exprs[0]);
         }
     }
 
