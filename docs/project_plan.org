@@ -1,0 +1,408 @@
+#+TITLE: Ruse Implementation Plan
+#+AUTHOR: Ryan Faulhaber
+#+STARTUP: overview logdone
+
+Working plan for taking *ruse* from its current frontend-only state to a conforming
+R7RS Scheme on the RBC-1 register bytecode VM.
+
+*The goal of this leg is a bytecode interpreter.* Milestones M0–M9 are the project.
+A JIT is an eventual ambition, sketched in [[*Beyond the interpreter: the eventual JIT][Beyond the interpreter]] so that a few cheap
+decisions don't foreclose it — but nothing in M0–M9 is shaped around it, and no JIT work
+is scheduled.
+
+This supersedes [[file:ROADMAP.md][ROADMAP.md]], which it carries forward largely intact. What is new here is
+the corrected status assessment, the org task structure, and the deferred-JIT section.
+
+No dates. This is a solo side project with a 10-month gap in its commit history;
+invented deadlines would only go stale. Effort is relative (S/M/L/XL); the ordering
+constraints are what actually matter.
+
+* Where the project actually stands
+
+Verified against the working tree, not against the roadmap's own claims.
+
+** What exists
+
+- =src/lexer.rs= (752 loc), =src/parser.rs= (576), =src/ast.rs= (184), =src/span.rs= (130) —
+  a span-carrying reader with miette diagnostics. 35 unit tests, all passing.
+- =src/repl.rs= — a parse-only REPL. =src/cli.rs= — clap args.
+- =src/vm.rs= — a doc comment and nothing else.
+- =tests/r7rs_suite/r7rs.scm= — 2518 lines from chibi-scheme, unwired.
+- =ruse-bytecode-spec.md= — RBC-1 drafted, with its known internal inconsistencies
+  already resolved by the frozen decisions.
+
+** What does not exist
+
+Everything downstream of the reader: no ~Value~, no GC, no instruction encoding, no VM,
+no compiler, no numeric tower, no macro expander, no standard library, no ports, no
+conformance driver. The frontend is roughly 5% of the work by volume and rather less
+than that by difficulty.
+
+** Two corrections to the recorded status, since fixed
+
+The M0 commit (=504bab9=, "green build/clippy") had stopped describing the tree:
+
+1. ~cargo clippy --all-targets -- -D warnings~ *failed* with two
+   ~useless_borrows_in_formatting~ errors at =src/parser.rs:369= and =:372=, both in
+   test code.
+2. The cause was that =rust-toolchain.toml= declared ~channel = "stable"~, a *floating*
+   channel — while =.github/workflows/ci.yml= asserts "The toolchain is pinned in
+   rust-toolchain.toml, so a build matrix adds no signal." Both could not be true, and
+   new clippy lints would keep breaking CI on commits that changed no code.
+
+Both fixed [2026-08-18 Tue]; the channel is now pinned to ~1.97.1~. Note that
+=rust-toolchain.toml= drives the dev shell (=flake.nix= uses
+~rust-bin.fromRustupToolchainFile~) but *not* ~nix build~, which uses nixpkgs'
+~rustPlatform~ default — so ~nix develop~ and ~nix build~ can still compile with
+different rustc versions. Pre-existing, and worth closing at some point.
+
+Everything else M0 claimed does hold: ~StreamingParser~ is collapsed into one reader,
+~...~ lexes as a single identifier, signed literals route through the number path, and
+the restriction lints are correctly scoped to non-test builds.
+
+* Frozen decisions A–H
+
+Ratified previously and unchanged. See [[file:ROADMAP.md][ROADMAP.md]] for the full rationale table.
+
+| # | Decision |
+|---|----------|
+| A | ~Value~ is ~repr(transparent) struct Value(u64)~, NaN-boxed: immediate flonums, 48-bit fixnums, chars, 6 singletons, one heap-pointer tag. Hardware NaNs canonicalized to a fixed non-signature pattern |
+| B | GC is precise, non-moving, stop-the-world tri-color mark-sweep, ~Drop~-on-sweep. Write barriers emitted as no-ops from day one |
+| C | Compiler is direct syntax-directed codegen (destination-register + tail-flag descent) over a typed Core IR, with a Lua-5 ~FuncState~ register allocator. No CPS, no ANF |
+| D | Numeric tower on ~num-bigint~/~num-rational~/~num-integer~/~num-traits~. 48-bit fixnum with centralized promote/demote |
+| E | Hygiene via Flatt scope-sets; a ~Syntax~ type designed *before* the expander. An unhygienic gensym-rename prototype lands first |
+| F | One ~Continuation~ heap object, callable. Escape-only capture first, then upgraded in place to multi-shot via whole-stack copy |
+| G | Stdlib in 3 layers: opcode-backed prims, a ~PRIMCALL~ native-fn table, and a baked-in =prelude.scm=. Every prim is *also* a global-slot procedure |
+| H | ~read~ produces a runtime ~Value~ datum graph (cyclic-capable), not the tree ~Expr~ |
+
+Also frozen: 50 real opcodes with =0x40=–=0x45= reserved for RBC-2; strict R7RS semantics
+(exact-rational ~DIV~, non-transferring ~with-exception-handler~, IEEE ~(/ 1.0 0.0)~ ⇒
+~+inf.0~); tests key on *disassembly text, never raw bytes*.
+
+* Four habits that cost nothing and keep the door open
+
+Each of these is justified on its own merits for the interpreter. That they also happen
+to make a future JIT tractable is a bonus, not the reason — none of them is a tax on
+M0–M9. They are called out here only because the *opposite* choice in each case is the
+natural one to drift into, and all four are expensive to reverse later.
+
+1. *Tag constants and heap layout live in one module.* ~repr(C)~ on every heap type,
+   with the NaN-box masks and shifts defined once in =src/value/layout.rs=. Justified
+   now because tag logic duplicated across the allocator, the GC, and the printer will
+   diverge; ~const~ offset assertions catch layout drift at compile time.
+
+2. *Opcode semantics live in standalone runtime functions, not in ~match~ arms.* Each
+   dispatch arm decodes operands and calls e.g. ~rt::add(a, b) -> Result<Value, VmError>~.
+   Justified now because it makes every opcode unit-testable without booting a VM, keeps
+   the dispatch loop small enough to read, and stops the numeric tower's entry points from
+   being buried inside a 2000-line ~match~. *This is the one most easily lost* — the
+   natural way to write a bytecode interpreter is semantics inline in the arms.
+
+3. *Global access is one indirection through a stable-address, append-only slot vector.*
+   Not optional: R7RS §5.4 requires redefinition to take retroactive effect, so
+   ~GETGLOBAL~ can never inline a direct address. The slot key must be decoupled from the
+   constant-pool name string used for diagnostics.
+
+4. *The interpreter stays the authority on behavior.* Anything that answers "what does
+   this program do" — the numeric tower, ~equal?~, the printer — belongs behind an
+   interface rather than inside the evaluator, so a second consumer never needs a second
+   implementation. Cheap discipline now; the difference between one Scheme and two later.
+
+* DONE [#A] M0 — Repo hygiene and spec freeze [/]                    :effort_S:
+CLOSED: [2026-08-18 Tue]
+
+*Exit met:* ~cargo clippy --all-targets -- -D warnings~, ~cargo fmt --all -- --check~,
+~cargo nextest run --all-targets~ (35 passing) and ~cargo test --doc~ all green.
+
+- [X] Fix ~useless_borrows_in_formatting~ at =src/parser.rs:369= and =:372=
+- [X] Pin =rust-toolchain.toml= to ~channel = "1.97.1"~ so lint drift stops breaking
+      unrelated commits; bump deliberately
+- [X] Scope clippy restriction lints to non-test builds
+- [X] Collapse ~Parser~/~StreamingParser~ into one reader
+- [X] Route ~+~/~-~ + digit through the number path; tokenize ~...~ as one identifier
+- [X] Modernize CI (nextest, rust-cache, hardened clippy)
+
+* TODO [#A] M1 — NaN-boxed ~Value~ and minimal precise GC [/]         :effort_L:
+
+*Deps:* M0.
+*Exit:* construct pairs/vectors/strings/symbols/bignums, trigger a collection, prove live
+values survive and dead ones ~Drop~; ~eq?~ is pointer identity on interned symbols.
+
+- [ ] ~Value(u64)~ with immediate constructors and NaN canonicalization; round-trip tests
+- [ ] =src/value/layout.rs= — the single home for tag constants, masks and shifts
+- [ ] ~make_integer~ with centralized fixnum↔bignum promote/demote
+- [ ] ~repr(C)~ ~GcHeader~ (tag/color/flags) and ~HeapTag~: Pair, Str, Symbol, Vector,
+      Bytevector, Closure, UpvalueCell, Bignum, Record, RecordType
+- [ ] ~const~ offset assertions for every heap type's fields
+- [ ] Global symbol interner
+- [ ] Precise non-moving tri-color mark-sweep with ~Drop~-on-sweep; root API
+- [ ] Roots include the interner table *and* a handle/pin protocol for native-fn
+      (~PRIMCALL~) temporaries — both are easy-to-miss precise-GC holes
+- [ ] Write-barrier API ~wb(container, new)~ as a no-op, ready for the mutating opcodes
+
+* TODO [#A] M2 — Encoding, decoder, ~Op~ enum, verifier, disassembler [/] :effort_M:
+
+*Deps:* M1.
+*Exit:* hand-assembled ~Proto~ s round-trip encode→decode→disassemble as stable mnemonic
+text; the verifier rejects bad operands; the disassembler reproduces spec §6.1 factorial.
+
+- [ ] ~Insn(u32)~ accessors (spec §3.1) plus symmetric encoder constructors
+- [ ] ~Op~ enum (~repr(u8)~), 50 opcodes, =0x40=–=0x45= reserved
+- [ ] Encode-side ~Proto~: code, constant pool as ~Value~ s, upvals, child protos, arity,
+      max window, line table. ~UpvalDesc~ = ParentLocal | ParentUpval
+- [ ] Load-time verifier: operand ranges, window ≤ 250, in-bounds indices
+- [ ] =src/disasm.rs=; ~insta~ snapshots of disassembly text, never raw bytes
+- [ ] Spec §6 worked examples are schematic and internally inconsistent — derive the
+      correct encodings rather than transcribing them
+
+* TODO [#A] M3 — Walking skeleton: dispatch loop + core codegen [/]  :effort_XL:
+
+*Deps:* M1, M2.
+*Exit:* tail-recursive ~fact~ runs to the right result in *constant* frame depth; simple
+arithmetic/list/~define~ programs print; the first non-zero =r7rs.scm= slice passes.
+
+The single most important milestone. It is the first end-to-end result and it fixes the
+shape everything after it is written against.
+
+- [ ] VM: flat per-fiber register file (~Vec<Value>~), ~Frame~ stack, ~match~-on-~u8~
+      dispatch, usize-index addressing (never hold a ~&mut~ slice across a nested call)
+- [ ] =src/rt/= — each opcode's semantics as a standalone, separately-testable function;
+      dispatch arms decode operands and call into it
+- [ ] Opcode subset: MOVE, LOADI/LOADK/LOADIMM, GET/SETGLOBAL, ADD/SUB/MUL fixnum-fast,
+      NUMEQ/NUMLT/NUMLE, EQ/EQV, TEST, JMP, CALL/TAILCALL/RETURN/RETURN1, CLOSURE
+      (no captures yet), PRIMCALL
+- [ ] Global slots: append-only, stable-address vector, with unbound detection
+- [ ] Every error path is a typed ~VmError~ ~Result~ — no ~unwrap~/~unreachable~, per the
+      lint wall
+- [ ] Compiler: Core IR, special-form classification (define/lambda/if/quote/set!/begin/
+      let), lexical addressing, Lua ~FuncState~ allocation, tail-position propagation,
+      fixed-arity lambda → child ~Proto~ + CLOSURE, ~ADDI~ peephole
+- [ ] Minimal ~display~/~write~/~newline~, ~cons~/~car~/~cdr~/~eq?~, and a non-cyclic
+      ~equal?~ (the ~(test …)~ shim compares with it)
+- [ ] ~eval_str~ wiring read→compile→run→write; =main.rs= file path replaces the TODO
+- [ ] The ~(chibi test)~ shim and an error-tolerant incremental conformance driver
+      (skip on unbound identifier) reporting a passing-form tally
+
+* TODO [#B] M4 — Closures, upvalues, binding and derived forms [/]    :effort_L:
+
+*Deps:* M3.
+*Exit:* spec §6.2 ~make-counter~ yields two *independent* counters; ~set!~ on a captured
+variable mutates the shared binding; the ~let~-family/~cond~/~case~/~and~/~or~ slice passes.
+
+- [ ] CLOSURE with upvalue descriptors; Lua-style open→closed upvalue list;
+      GET/SETUPVAL through cells with the SETUPVAL barrier; CLOSEUPVALS and ~JMP A>0~
+      for loop-exit closing
+- [ ] Variadic/rest lambdas (~has_rest~); internal defines as ~letrec*~ with the
+      ~undefined~ black hole and forward-reference errors
+- [ ] Derived forms as core syntax until M8: ~and~/~or~/~when~/~unless~/~cond~ (incl. ~=>~,
+      ~else~), ~case~ (EQV chains incl. ~=>~ clauses; JMPIDX deferred), ~let*~/~letrec~/
+      ~letrec*~/named ~let~/~do~, ~let-values~/~let*-values~
+- [ ] ~quasiquote~/~unquote~/~unquote-splicing~ with depth tracking (ensure ~append~ and
+      ~list->vector~ exist before this codegen lands)
+
+* TODO [#B] M5 — Numeric tower and the §7.1.1 number reader [/]      :effort_XL:
+
+*Deps:* M1, M3.
+*Exit:* bignums, reduced rationals, ~#e~/~#i~ prefixes, exact complex, inf/NaN read,
+compute and print; the signed-literal lex bug fixed; non-gating differential against
+chibi on a proptest mix. ~exact-integer-sqrt~/~floor/~/~truncate/~ defer past M7.
+
+- [ ] Tower types: bignum, gcd-normalized rational, flonum incl. ±inf/NaN, exact and
+      inexact complex
+- [ ] Generic dispatch with exact/inexact contagion; ~DIV~ exact-rational trap; ~QUOT~
+      integer fast path; NaN-aware comparisons
+- [ ] Predicates, exact/inexact conversion, ~number->string~/~string->number~ with radix
+- [ ] Number sub-reader: full grammar — radix and exactness prefixes, rationals,
+      decimals, inf/NaN, ~±i~; fix the ~+~/~.~-prefixed dispatch and the dead minus-sign
+      code at =lexer.rs:280=
+
+* TODO [#B] M6 — Reader datum breadth and runtime ~read~ [/]          :effort_L:
+
+*Deps:* M1, M3, M5.
+*Exit:* vectors, bytevectors, nested ~#|…|#~, ~#;~, full char and string escapes,
+~|…|~ identifiers, and a cyclic ~#0=…~ datum all read into runtime ~Value~ s; reading ~'x~
+yields the list ~(quote x)~; reader-heavy suite sections run.
+
+- [ ] ~Vector~/~Bytevector~ data (bytes validated 0–255) and their openers
+- [ ] Nested block comments; ~#;~ (read-and-discard one datum); full char names and ~#\xHH~
+- [ ] String escapes (~\xHH;~, ~\a~, ~\b~, line continuation); pipe identifiers;
+      ~#true~/~#false~; ellipsis and peculiar identifiers; token-delimiter enforcement
+- [ ] Datum labels — shared and cyclic ~Value~ graphs with placeholder patching
+- [ ] ~#!fold-case~ state
+- [ ] Runtime ~read~ over a string source (~Port~ lands in M9); quote sugar desugared
+
+* TODO [#A] M7 — First-class control [/]                             :effort_XL:
+
+*Deps:* M3, M4.
+*Exit:* escape continuations; re-entrant ~dynamic-wind~ generator ordering;
+~call-with-values~; ~raise-continuable~ returns to the raise point; ~guard~ incl. ~=>~ and
+nested re-raise; ~parameterize~ under ~call/cc~.
+
+The highest-risk runtime work in the project. ~call/cc~, ~dynamic-wind~, exceptions,
+multiple values and parameters all interact, and none of them can be added convincingly
+after the fact.
+
+- [ ] Multiple values via open-ended CALL/RETURN counts (accept-all / forward-all);
+      fiber value-count plumbed through returns and continuation invocation
+- [ ] CAPTURECC: escape-only first, then multi-shot full-copy; capture closes open upvalues
+- [ ] Wind stack with common-ancestor unwind/rewind (re-entrant VM calls)
+- [ ] Handler stack; ~with-exception-handler~ *non-transferring* so ~raise-continuable~
+      can return; ~guard~ lowered to ~call/cc~ + ~with-exception-handler~;
+      condition/error-object type
+- [ ] ~make-parameter~/~parameterize~ on the wind stack (captured continuations restore
+      parameters)
+- [ ] Compiler suppresses TAILCALL for ~dynamic-wind~ and ~with-exception-handler~ body
+      thunks — those positions are *not* tail, and getting it wrong silently skips
+      after-thunks and handlers
+
+* TODO [#B] M8 — Hygienic ~syntax-rules~ and the library system [/]   :effort_XL:
+
+*Deps:* M3, M4, M6.
+*Exit:* the suite's §4.3 hygiene block passes (introduced-binding non-capture,
+aux-keyword shadowing, custom and escaped ellipsis, nested and improper patterns,
+macro-defining macros, expand-to-define); the top-of-file ~import~ s resolve.
+
+- [ ] ~Syntax~ with scope-sets; fresh-scope minting; span-preserving expansion
+- [ ] ~syntax-rules~ pattern compiler, match tree, template instantiation;
+      ~define-syntax~/~let-syntax~/~letrec-syntax~
+- [ ] Fixpoint expander over a compile-time env; body expander classifying interleaved
+      ~define~/~define-syntax~/~define-values~/expression as ~letrec*~
+- [ ] ~define-record-type~ (§5.5): generated constructor, predicate, accessors, mutators
+- [ ] Re-express M4 derived forms as a bootstrap ~syntax-rules~ prelude, keeping ~let~ and
+      ~letrec~ as compiler builtins for diagnostics
+- [ ] Library registry; import-set modifiers (~only~/~except~/~prefix~/~rename~) as slot
+      *aliasing* over the one append-only global slot vector; ~cond-expand~;
+      ~include~/~include-ci~
+
+* TODO [#A] M9 — Stdlib breadth, ports and I/O, full conformance [/] :effort_XL:
+
+*Deps:* M5, M6, M7, M8.
+*Exit:* =r7rs.scm= loads end-to-end through the incremental driver with a high, tracked
+passing-form count, published per CI run. *This is the finish line for the interpreter.*
+
+- [ ] ~Port~ heap type (string/bytevector/file, in and out) and the I/O surface; full
+      ~write~/~display~ with datum-label cycle detection (~write-shared~/~write-simple~)
+- [ ] Cycle-safe ~equal?~; boolean/symbol/char/string/vector/bytevector surfaces
+- [ ] Unicode case-mapping data for char and string case ops, ~char-ci=?~/~string-ci=?~,
+      ~digit-value~
+- [ ] =prelude.scm= HOFs (~map~/~for-each~/~vector-map~/~string-map~/folds/~assoc~ and
+      ~member~ families/~force~); ~delay~/~delay-force~/~make-promise~ and ~Promise~;
+      ~case-lambda~; multiple-value numeric ops (~floor/~, ~truncate/~,
+      ~exact-integer-sqrt~) over single-value prims
+- [ ] ~(scheme inexact)~/~(scheme complex)~ math; ~(scheme process-context/time/file/
+      eval/repl/load)~ behind cargo features. Register stub or feature-gated libraries so
+      the suite's top ~import~ resolves even where procedures are unimplemented
+- [ ] Literal-constant immutability (§4.1.2/§6.7): ~set-car!~/~string-set!~ on a pooled
+      quoted or literal value must error or copy
+- [ ] Conformance CI: gating ~nextest~; tracked non-gating =r7rs.scm= score; non-gating
+      differential against chibi-scheme
+
+* TODO [#C] M10 — Benchmarks and performance baseline [/]             :effort_S:
+
+*Deps:* M9 (or M3 if you want early numbers).
+*Exit:* recorded interpreter timings on a stable benchmark set, published per CI run.
+
+Independently worth doing — it tells you whether the interpreter is respectable before
+anyone argues about compiling it. It is also the only honest basis for a later
+speedup claim.
+
+- [ ] =benches/= with criterion: fib, tak, list traversal, string building, a numeric
+      tower mix, a closure-heavy benchmark, a ~call/cc~ benchmark
+- [ ] Record baselines; compare against chibi-scheme and, for scale, Chez
+- [ ] Profile the dispatch loop and find where time actually goes. Some of the answers —
+      allocation rates, GC pause distribution, ~PRIMCALL~ overhead — are fixable in the
+      interpreter and worth fixing before reaching for a compiler
+
+* Beyond the interpreter: the eventual JIT
+
+Not scheduled, not decided, and explicitly not the current goal. Recorded so the thinking
+isn't lost and so the shape is known when the time comes. Nothing in M0–M9 depends on any
+of it; the [[*Four habits that cost nothing and keep the door open][four habits]] above are the entire hedge, and each stands on its own merits.
+
+Treat everything below as a sketch to be argued with later, not a plan.
+
+** Likely shape
+
+Three tiers, with the interpreter as permanent ground truth and deopt target:
+
+- *Tier 0* — the RBC-1 interpreter. Never removed, never modified to accommodate a
+  compiler. Every JIT bug is found by disagreement with it, which only works if it stays
+  independent.
+- *Tier 1* — a baseline JIT: per-~Proto~ straight-line lowering of each bytecode, no
+  speculation, no inlining, calling the same =src/rt/= functions the interpreter calls.
+  Buys back dispatch and operand-decode overhead.
+- *Tier 2* — speculative optimization driven by type feedback: unboxed fixnums and
+  flonums in machine registers, guards, deopt to Tier 0 at a bytecode PC, inlining of
+  small callees and ~PRIMCALL~ s.
+
+** The constraint that will dominate the design
+
+Decisions B (precise, non-moving GC) and F (~call/cc~ by whole-stack copy) together
+rule out the conventional shape, where a method JIT keeps Scheme values in machine
+registers and uses the native call stack. That shape would need GC stack maps for
+precise root discovery, and would leave ~call/cc~ with no copyable frame stack.
+
+The workable answer is that generated code operates on the *interpreter's* data
+structures — the fiber's ~Vec<Value>~ register window and the same ~Frame~ records — and
+spills every live value to memory at each safepoint. It costs spill traffic and buys back
+correctness on the two hardest features in the language. Worth revisiting only with
+evidence, not with intuition.
+
+** Open, when the time comes
+
+- Backend. Cranelift is the obvious first candidate: pure Rust so the Nix closure stays
+  clean (the reasoning that chose ~num-bigint~ over GMP), targets x86-64 and aarch64,
+  built for JIT use. Copy-and-patch stencils would compile faster but need build-time
+  stencil extraction; LLVM is too heavy for a baseline tier; ~dynasm-rs~ means
+  hand-writing encodings for two architectures.
+- Whether Tier 1 compiles whole ~Proto~ s or only reached regions.
+- Whether compilation happens off-thread, and how that interacts with GC.
+- Code-memory lifetime: are compiled entries GC roots for their ~Proto~ (simple, leaks)
+  or collected with it (correct, more plumbing)?
+- Re-entering a captured continuation whose frames were originally JIT-compiled, when
+  the compiled entry has since been invalidated.
+- A differential harness running the corpus under both tiers with byte-identical output
+  required — the enforcement mechanism for "the JIT changes speed, never behavior."
+
+** Also deferred, and unrelated to the JIT
+
+The reserved opcodes =0x40=–=0x45= are for the RBC-2 concurrency set (~SPAWN~, ~YIELD~,
+~RESUME~, ~CHANMAKE~, ~CHANSEND~, ~CHANRECV~), which needs a fiber scheduler and
+postdates a working sequential VM. The spec's deferred flonum-specialized opcode tier
+(§1.2) belongs in the same bucket: revisit with profiles, not before.
+
+* Open questions to pin before the relevant code freezes
+
+- [ ] *~CADR~ C-byte bit layout* (spec open-Q 1) and the *~TYPEP~ type-selector enum*
+      (open-Q 2) — freeze jointly between VM and compiler. Until then emit plain
+      ~CAR~/~CDR~ chains and EQV chains for ~case~
+- [ ] *Global slot namespace across libraries* (open-Q 3): one append-only slot vector
+      with import-as-aliasing, versus per-library namespaces. Constrains ~GETGLOBAL~
+      resolution and REPL retroactive redefinition (§5.4)
+- [ ] *~PRIMCALL~ conventions* beyond 256 entries (the globals-as-procedures fallback),
+      and the variadic and multiple-value calling conventions the spec leaves unspecified
+- [ ] *Non-R7RS extensions*: keep ~[ ]~ bracket lists and the ~#!eof~/~#!default~
+      singletons, or drop them? Commit to exact complex (R7RS permits omitting it, but
+      the suite tests it)?
+- [ ] *~DIV~ policy* (spec open-Q 4): confirm the "divides evenly" fast path earns its
+      branch, or whether ~DIV~ should always go to the runtime with ~QUOT~ carrying the
+      fast integer path alone
+- [ ] *Line-info table format* (spec open-Q 5) — needed by ~error~ source locations
+      before the compiler is pleasant to debug
+
+* Sequencing notes
+
+The critical path is *M0 → M1 → M2 → M3 → M7 → M9*. Everything else either hangs off M3
+or feeds M9.
+
+- *M3 is the milestone that matters.* It is the first end-to-end result, and it fixes the
+  shape that M4–M9 are all written against. Time spent getting the dispatch loop, the
+  runtime-function split, and the ~FuncState~ allocator right is repaid several times.
+- *M7 is the risk.* First-class control cannot be retrofitted; if something in the frame
+  or upvalue design is going to be wrong, this is where it surfaces. Prefer discovering
+  that before M8 and M9 pile on top.
+- *M4, M5, M6 and M8 are parallelizable* once M3 lands, and are largely independent of
+  each other. They are where to go when the runtime work needs a break.
+- *Wire =r7rs.scm= slices in as early as they will run.* The incremental, error-tolerant
+  driver from M3 turns a 2518-line all-or-nothing file into a score that goes up, which
+  is the difference between a conformance suite that motivates and one that sits unused.
