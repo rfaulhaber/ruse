@@ -1,5 +1,12 @@
 # Ruse Implementation Roadmap
 
+> **Superseded by [`project_plan.org`](project_plan.org)**, which carries this document
+> forward and is where milestone status is tracked. This file is kept for the rationale
+> tables — the architecture-decision table below is the fullest statement of *why* each
+> decision went the way it did, and `project_plan.org` links back to it rather than
+> restating it. **The milestone status recorded here is frozen at the time of writing and
+> is no longer maintained.**
+
 Taking **ruse** from a frontend-only reader to a working R7RS Scheme on the RBC-1
 register bytecode VM (`ruse-bytecode-spec.md`).
 

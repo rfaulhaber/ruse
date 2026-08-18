@@ -7,4 +7,6 @@
 //! addressing-mode escapes.
 //!
 //! The instruction set (50 opcodes) is specified in `ruse-bytecode-spec.md`. Nothing is
-//! implemented yet — see `docs/ROADMAP.md` (milestones M2–M3) for the build order.
+//! implemented yet — see `docs/project_plan.org` (milestones M2–M3) for the build order.
+//! The values it will operate on, and the heap they live in, are in [`crate::value`] and
+//! [`crate::gc`].

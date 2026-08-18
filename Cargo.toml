@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 miette = { version = "7", features = ["fancy"] }
+num-bigint = "0.5"
+num-traits = "0.2"
 rustyline = "18"
 thiserror = "2"
 

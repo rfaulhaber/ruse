@@ -24,19 +24,24 @@ Verified against the working tree, not against the roadmap's own claims.
 ** What exists
 
 - =src/lexer.rs= (752 loc), =src/parser.rs= (576), =src/ast.rs= (184), =src/span.rs= (130) —
-  a span-carrying reader with miette diagnostics. 35 unit tests, all passing.
+  a span-carrying reader with miette diagnostics.
+- =src/value/= — the NaN-boxed ~Value~, the ~repr(C)~ heap objects, and =layout.rs=, the
+  single home for every mask, tag and field offset (M1).
+- =src/gc/= — the precise non-moving mark-sweep ~Heap~, the ~Trace~ root trait, and the pin
+  shadow stack for native temporaries (M1).
 - =src/repl.rs= — a parse-only REPL. =src/cli.rs= — clap args.
 - =src/vm.rs= — a doc comment and nothing else.
+- =tests/gc_drop.rs= — a counting ~#[global_allocator]~ proving sweep runs ~Drop~.
 - =tests/r7rs_suite/r7rs.scm= — 2518 lines from chibi-scheme, unwired.
 - =ruse-bytecode-spec.md= — RBC-1 drafted, with its known internal inconsistencies
   already resolved by the frozen decisions.
 
 ** What does not exist
 
-Everything downstream of the reader: no ~Value~, no GC, no instruction encoding, no VM,
-no compiler, no numeric tower, no macro expander, no standard library, no ports, no
-conformance driver. The frontend is roughly 5% of the work by volume and rather less
-than that by difficulty.
+The reader and the runtime foundation exist but nothing joins them: no instruction
+encoding, no VM, no compiler, no numeric tower beyond the fixnum/bignum boundary, no macro
+expander, no standard library, no ports, no conformance driver. The reader plus M1 is
+roughly 10% of the work by volume and rather less than that by difficulty.
 
 ** Two corrections to the recorded status, since fixed
 
@@ -122,23 +127,107 @@ CLOSED: [2026-08-18 Tue]
 - [X] Route ~+~/~-~ + digit through the number path; tokenize ~...~ as one identifier
 - [X] Modernize CI (nextest, rust-cache, hardened clippy)
 
-* TODO [#A] M1 — NaN-boxed ~Value~ and minimal precise GC [/]         :effort_L:
+* DONE [#A] M1 — NaN-boxed ~Value~ and minimal precise GC [/]         :effort_L:
+CLOSED: [2026-08-18 Tue]
 
 *Deps:* M0.
-*Exit:* construct pairs/vectors/strings/symbols/bignums, trigger a collection, prove live
-values survive and dead ones ~Drop~; ~eq?~ is pointer identity on interned symbols.
+*Exit met:* pairs, vectors, strings, symbols and bignums allocate; collections free the
+unreachable — including cycles — and keep the reachable; ~tests/gc_drop.rs~ proves through a
+counting ~#[global_allocator]~ that sweeping runs ~Drop~ rather than leaking the Rust-side
+buffers; ~eq?~ on interned symbols is pointer identity. 67 tests and 7 doctests green under
+~cargo nextest run --all-targets~, with ~cargo clippy --all-targets -- -D warnings~ and
+~cargo fmt --all -- --check~ clean, and ~nix build~ green with the two new dependencies.
 
-- [ ] ~Value(u64)~ with immediate constructors and NaN canonicalization; round-trip tests
-- [ ] =src/value/layout.rs= — the single home for tag constants, masks and shifts
-- [ ] ~make_integer~ with centralized fixnum↔bignum promote/demote
-- [ ] ~repr(C)~ ~GcHeader~ (tag/color/flags) and ~HeapTag~: Pair, Str, Symbol, Vector,
+The unsafe half was checked under Miri (nightly via ~rust-overlay~, not part of CI):
+=cargo miri test --lib= passes under *both* aliasing models — default Stacked Borrows and
+~-Zmiri-tree-borrows~ — covering the ~Box::into_raw~/~from_raw~ round trip, the header casts,
+the sweep, and the pin shadow stack. Miri's leak checker passes too, which is the independent
+confirmation that ~Drop for Heap~ really does release everything the heap still owns; the one
+exempted test is the one that deliberately ~mem::forget~ s a pin scope. Miri does emit one unavoidable *integer-to-pointer cast* warning
+at ~Value::header_ptr~ — strict provenance and NaN-boxing are fundamentally incompatible,
+since the whole technique is packing a pointer into 48 bits of an integer. The code uses
+~expose_provenance~/~with_exposed_provenance_mut~ rather than bare ~as~ casts so the
+exposed-provenance model applies and Miri can still check everything downstream of the cast.
+
+- [X] ~Value(u64)~ with immediate constructors and NaN canonicalization; round-trip tests
+- [X] =src/value/layout.rs= — the single home for tag constants, masks and shifts
+- [X] ~make_integer~ with centralized fixnum↔bignum promote/demote
+- [X] ~repr(C)~ ~GcHeader~ (tag/color/flags) and ~HeapTag~: Pair, Str, Symbol, Vector,
       Bytevector, Closure, UpvalueCell, Bignum, Record, RecordType
-- [ ] ~const~ offset assertions for every heap type's fields
-- [ ] Global symbol interner
-- [ ] Precise non-moving tri-color mark-sweep with ~Drop~-on-sweep; root API
-- [ ] Roots include the interner table *and* a handle/pin protocol for native-fn
+- [X] ~const~ offset assertions for every heap type's fields
+- [X] Global symbol interner
+- [X] Precise non-moving tri-color mark-sweep with ~Drop~-on-sweep; root API
+- [X] Roots include the interner table *and* a handle/pin protocol for native-fn
       (~PRIMCALL~) temporaries — both are easy-to-miss precise-GC holes
-- [ ] Write-barrier API ~wb(container, new)~ as a no-op, ready for the mutating opcodes
+- [X] Write-barrier API ~wb(container, new)~ as a no-op, ready for the mutating opcodes
+
+** What the encoding settled on
+
+Boxed values hide in the *negative* quiet-NaN region: sign, exponent and quiet bit all set,
+then a 3-bit tag at bits 50–48 and a 48-bit payload. Tags used: singleton, char, fixnum,
+heap pointer; four spare. Every NaN is canonicalized on the way in to a *positive* quiet NaN,
+which is not optional — x86-64 returns ~0xFFF8000000000000~ from ~0.0 / 0.0~, and that is
+exactly the signature word with tag 0.
+
+Singleton ordinal 0 is therefore ~undefined~, not ~#f~ and not a null pointer: if an
+uncanonicalized NaN ever does leak in, the black-hole marker errors loudly downstream rather
+than answering a silently wrong ~#f~ or dereferencing null. ~#f~=4 and ~#t~=5 make
+~is_boolean~ one mask and one compare, and truthiness one compare against ~#f~.
+
+** Two decisions worth knowing before M2 and M3
+
+- *Allocation never collects.* A precise collector frees exactly what no root reports, so a
+  collection inside ~cons~ would reap every temporary the caller is holding in a Rust local.
+  ~Heap::should_collect~ reports when a collection is due and the VM picks the safepoint —
+  an instruction boundary, where the register file is a complete root set. Native code that
+  allocates twice in a row pins across the gap (=src/gc/handle.rs=).
+- *Heap objects are reached through ~Heap::get~/~get_mut~, never through a raw ~Value~.* The
+  borrow of the heap is what makes the dereference safe, and it is also what stops a
+  reference into the heap being held across an allocation.
+
+** What the adversarial review of the implementation found
+
+Four independent review lenses over the finished code, each finding then handed to a skeptic
+tasked with refuting it: ten findings raised, six survived, deduplicating to three real
+defects. All three were reproduced from an external crate containing no ~unsafe~, and all
+three are fixed.
+
+1. *Blocker — safe outside code could retag a live object.* ~GcHeader::tag~ was ~pub~ and
+   ~HeapObject::header_mut~ was a safe method on a public trait, so
+   ~heap.get_mut::&lt;Pair&gt;(p).unwrap().header_mut().tag = HeapTag::Str~ compiled — and the
+   sweep then reconstructed a ~Box&lt;Str&gt;~ from a ~Pair~ allocation. A collector's tag byte is
+   as privileged as a vtable pointer. Header access moved to a crate-private supertrait,
+   which also seals ~HeapObject~ — necessary because ~Heap::get::&lt;T&gt;~ is generic over it, so
+   a foreign ~unsafe impl~ claiming ~TAG = Pair~ would hand out its own type over a pair's
+   memory. Both holes are now locked shut by ~compile_fail~ doctests.
+
+2. *Major — the pin shadow stack lost pins under nesting.* Scopes recorded a base index and
+   truncated to it, so a pin taken from an *enclosing* scope while an inner scope was open
+   sat above the inner scope's mark and was silently released when it closed — precisely the
+   accumulator-plus-temporaries idiom nesting exists for. Rewritten so a pin is a stable
+   slot, not a position: each scope releases only the slots it allocated, released slots bump
+   a generation so a stale handle is caught rather than aliasing, drop order no longer
+   matters, and a forgotten scope over-roots (safe) instead of under-rooting.
+
+3. *Major — the accessors' documented obligation was the wrong one.* ~Heap::get~ claimed the
+   heap borrow was proof of safety. It is not: it gives the returned *reference* a correct
+   lifetime, but a ~Value~ is ~Copy~ with no lifetime, so one captured before a collection
+   that did not reach it is dangling — and the quiet failure is worse than the crash, since
+   a later allocation reuses the block and the stale ~Value~ starts naming a different live
+   object. The docs now state the real obligation, and a ~#[cfg(debug_assertions)]~ registry
+   of owned addresses turns a stale or cross-heap ~Value~ into a loud failure in tests and
+   under Miri, at zero release cost. The permanent answer is the open question above.
+
+** Deferred out of M1, deliberately
+
+- The ~Closure~ heap object needs ~Proto~, which is an M2 artifact. The *tag* is declared now
+  so the numbering never moves; nothing can allocate one, and the three tag dispatches
+  (trace, drop, size) carry a ~debug_assert!~ arm that M2 replaces.
+- Decision A's ~cfg~-gated tagged-enum fallback for debugging and LA57 platforms is not
+  built. In its place ~Value::from_header_ptr~ asserts that every allocation fits in 48 bits,
+  so an unsupported platform fails loudly at the first ~cons~ instead of truncating pointers.
+- ~Str~ stores UTF-8, which makes ~string-ref~ O(n). Same trade chibi makes; revisit in M9 if
+  conformance work shows it hurting.
 
 * TODO [#A] M2 — Encoding, decoder, ~Op~ enum, verifier, disassembler [/] :effort_M:
 
@@ -389,6 +478,35 @@ postdates a working sequential VM. The spec's deferred flonum-specialized opcode
       fast integer path alone
 - [ ] *Line-info table format* (spec open-Q 5) — needed by ~error~ source locations
       before the compiler is pleasant to debug
+- [ ] *The safe-versus-unsafe heap-access contract* — decide before M3 writes its inner
+      loop. ~Heap::get~/~get_mut~/~tag_of~ are safe functions whose real precondition is
+      that the ~Value~ has not been swept; a ~Value~ is ~Copy~ and carries no lifetime, so
+      nothing enforces it. M1 ships a ~debug_assert!~ against a registry of owned addresses,
+      which catches it in tests and under Miri but not in release. The two candidate
+      resolutions: mark the *accessors* ~unsafe fn~ (coherent, but puts ~unsafe~ on every
+      field read in the dispatch loop, which desensitizes), or mark the *invalidating*
+      operation unsafe — ~pub unsafe fn collect~, contract "every ~Value~ live after this
+      returns must be reachable from ~roots~ or the pin stack" — which is the ~Vec::set_len~
+      shape and costs one ~unsafe~ block per safepoint, exactly where the root set genuinely
+      has to be complete. The second looks stronger. Branding ~Value~ with the heap's
+      lifetime does *not* resolve it: a branded ~Value~ is still stale after a collection of
+      its own heap, and the sound version is ~gc-arena~'s ~Gc<'gc, T>~, which is a redesign
+      of the ~Copy~ NaN-boxed word
+- [ ] *~LOADIMM~ operand mapping* — =ruse-bytecode-spec.md= §4.1 lists the immediate
+      singletons as ~0=#f 1=#t 2='() 3=unspecified 4=eof 5=undefined~; =src/value/layout.rs=
+      assigns the opposite. No code is affected yet. ~SINGLETON_UNDEFINED~ must stay 0 —
+      that is pinned by the x86-64 indefinite-QNaN assertion, not by the boolean-adjacency
+      ones, which hold under either ordering. When the ~Op~ enum lands, define ~LOADIMM~'s
+      operand *as* the =layout.rs= ordinal and amend the spec to point at it, the same
+      treatment already applied to the spec's "56 opcodes" prose. Do not add a second table
+- [ ] *Weak symbol interner*, before ~string->symbol~ lands (M6). Interned symbols are
+      permanent roots today, so unbounded distinct names retain forever and lengthen every
+      mark. Landing a weak interner now would be actively harmful — it makes ~Heap::symbol~'s
+      result collectable while nothing in the tree traces symbols. Precondition for the
+      change: constant pools, the global environment and the reader's in-flight values are
+      all traced, and ~Heap::symbol~ callers pin across allocations. Then drop ~symbols~ from
+      the root walk and evict in ~sweep~ (white + tag ~Symbol~ + ~interned~ ⇒ remove the key,
+      which shares its ~Rc<str>~ with the symbol)
 
 * Sequencing notes
 

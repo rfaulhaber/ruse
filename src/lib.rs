@@ -12,15 +12,19 @@
 )]
 
 pub mod ast;
+pub mod gc;
 pub mod lexer;
 pub mod parser;
 pub mod span;
+pub mod value;
 pub mod vm;
 
 pub use ast::Expr;
+pub use gc::Heap;
 pub use lexer::{LexError, Lexer, Token, TokenIterator, TokenKind};
 pub use parser::{ParseError, Parser};
 pub use span::{SourceFile, Span};
+pub use value::Value;
 
 #[cfg(test)]
 mod tests {
