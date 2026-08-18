@@ -29,6 +29,10 @@
 //! uncanonicalized NaN ever leak in, it decodes as the black-hole marker, which errors
 //! loudly downstream, rather than as `#f` (a silently wrong answer) or a null heap pointer.
 
+// The memory map is declarative by construction: constants, a header struct, and compile-time
+// assertions. Nothing here should ever need to dereference anything.
+#![forbid(unsafe_code)]
+
 use core::mem::{align_of, offset_of, size_of};
 
 use crate::value::object::{

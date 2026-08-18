@@ -15,6 +15,11 @@
 //! boundaries where the register file is a complete root set. Native code that must allocate
 //! twice in a row pins across the gap — see [`handle`].
 
+// The collector is the reason this crate has an `unsafe_code` budget at all: it hands out
+// typed references derived from a tag byte, and it reconstructs `Box`es from raw pointers.
+// The package denies unsafe; this module and `trace` are two of the four places that opt out.
+#![allow(unsafe_code)]
+
 pub mod handle;
 mod trace;
 
@@ -533,10 +538,11 @@ impl Drop for Heap {
     fn drop(&mut self) {
         let mut cur = self.all;
         while !cur.is_null() {
-            // SAFETY: `cur` is a node of this heap's own list, and the heap is going away,
-            // so nothing can observe the freed objects afterwards. The interner's raw
-            // pointers are dropped without being dereferenced.
+            // SAFETY: `cur` is a node of this heap's own list, so its header is readable.
             let next = unsafe { (*cur).next };
+            // SAFETY: the heap is going away, so every object on the list is unreachable and
+            // nothing can observe it afterwards. The interner's raw pointers are dropped
+            // without being dereferenced.
             unsafe { drop_object(cur) };
             self.live_set.remove(cur);
             cur = next;
@@ -554,8 +560,8 @@ impl Drop for Heap {
 unsafe fn trace_object(p: *mut GcHeader, tracer: &mut Tracer<'_>) {
     // SAFETY: the caller guarantees `p` is a live object, so its header is readable.
     let tag = unsafe { (*p).tag };
-    // SAFETY (each arm): the tag identifies the concrete type, and `HeapObject` guarantees
-    // that type begins with the header at offset 0, so the cast recovers the original type.
+    // SAFETY: in every arm, the tag identifies the concrete type, and `HeapObject` guarantees
+    // that type begins with its header at offset 0, so the cast recovers the original type.
     unsafe {
         match tag {
             HeapTag::Pair => (*p.cast::<Pair>()).trace_fields(tracer),
@@ -588,8 +594,8 @@ unsafe fn trace_object(p: *mut GcHeader, tracer: &mut Tracer<'_>) {
 unsafe fn drop_object(p: *mut GcHeader) {
     // SAFETY: the caller guarantees `p` is a live object, so its header is readable.
     let tag = unsafe { (*p).tag };
-    // SAFETY (each arm): as `trace_object`, plus the caller's guarantee that the object is
-    // unreachable, which makes reconstructing and dropping its `Box` sound.
+    // SAFETY: in every arm, as `trace_object`, plus the caller's guarantee that the object
+    // is unreachable, which makes reconstructing and dropping its `Box` sound.
     unsafe {
         match tag {
             HeapTag::Pair => drop_as::<Pair>(p),
@@ -625,7 +631,7 @@ unsafe fn drop_as<T: HeapObject>(p: *mut GcHeader) {
 unsafe fn object_bytes(p: *mut GcHeader) -> usize {
     // SAFETY: the caller guarantees `p` is a live object, so its header is readable.
     let tag = unsafe { (*p).tag };
-    // SAFETY (each arm): as `trace_object`.
+    // SAFETY: in every arm, as `trace_object`.
     unsafe {
         match tag {
             HeapTag::Pair => size_as::<Pair>(p),
@@ -996,7 +1002,11 @@ mod tests {
     /// around a hundred thousand of them. The grey worklist is what makes this survivable.
     #[test]
     fn a_very_long_list_marks_without_recursing() {
-        const CELLS: usize = 200_000;
+        // Miri interprets every allocation, so the full-size list would take hours there.
+        // A few thousand cells still drives the worklist through the same drain path, which
+        // is what Miri is here to check; the stack-depth claim is what the native-speed run
+        // establishes.
+        const CELLS: usize = if cfg!(miri) { 2_000 } else { 200_000 };
 
         let mut heap = Heap::new();
         let mut head = Value::NIL;

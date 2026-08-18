@@ -7,6 +7,10 @@
 //! Objects are never constructed directly: [`Heap`](crate::gc::Heap) owns their lifecycle,
 //! because an object that is not on the heap's all-objects list is invisible to the sweep.
 
+// Declarations only: the `unsafe impl HeapObject` blocks below assert layout and tag
+// invariants the collector relies on. This file contains no unsafe *operations*.
+#![allow(unsafe_code)]
+
 use std::rc::Rc;
 
 use num_bigint::BigInt;
@@ -120,6 +124,9 @@ impl Header for Pair {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. `trace_fields` reports `car` and `cdr`, which are its only
+// `Value` fields.
 unsafe impl HeapObject for Pair {
     const TAG: HeapTag = HeapTag::Pair;
 
@@ -156,6 +163,9 @@ impl Header for Str {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. A `Str` owns a `String` and no `Value`s, so there is nothing
+// to trace.
 unsafe impl HeapObject for Str {
     const TAG: HeapTag = HeapTag::Str;
 
@@ -196,6 +206,9 @@ impl Header for Symbol {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. A `Symbol` owns its name and no `Value`s, so there is nothing
+// to trace.
 unsafe impl HeapObject for Symbol {
     const TAG: HeapTag = HeapTag::Symbol;
 
@@ -229,6 +242,9 @@ impl Header for Vector {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. `trace_fields` reports every element of `elems`, its only
+// `Value` field.
 unsafe impl HeapObject for Vector {
     const TAG: HeapTag = HeapTag::Vector;
 
@@ -266,6 +282,9 @@ impl Header for Bytevector {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. A `Bytevector` owns octets and no `Value`s, so there is nothing
+// to trace.
 unsafe impl HeapObject for Bytevector {
     const TAG: HeapTag = HeapTag::Bytevector;
 
@@ -302,6 +321,8 @@ impl Header for UpvalueCell {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. `trace_fields` reports `value`, its only `Value` field.
 unsafe impl HeapObject for UpvalueCell {
     const TAG: HeapTag = HeapTag::UpvalueCell;
 
@@ -337,6 +358,9 @@ impl Header for Bignum {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. A `Bignum` owns a `BigInt` and no `Value`s, so there is nothing
+// to trace.
 unsafe impl HeapObject for Bignum {
     const TAG: HeapTag = HeapTag::Bignum;
 
@@ -373,6 +397,9 @@ impl Header for Record {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. `trace_fields` reports `rtype` and every element of `fields`,
+// which together are all of its `Value` fields.
 unsafe impl HeapObject for Record {
     const TAG: HeapTag = HeapTag::Record;
 
@@ -414,6 +441,9 @@ impl Header for RecordType {
     }
 }
 
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. `trace_fields` reports `name` and every element of
+// `field_names`, which together are all of its `Value` fields.
 unsafe impl HeapObject for RecordType {
     const TAG: HeapTag = HeapTag::RecordType;
 

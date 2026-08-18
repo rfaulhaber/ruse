@@ -12,6 +12,9 @@
 // Integration tests are separate crates, so the crate-root `cfg_attr(test, allow(...))` in
 // the library does not reach them. Asserting with `unwrap` is the point of a test.
 #![allow(clippy::unwrap_used)]
+// A `GlobalAlloc` implementation is unsafe by definition; every method here forwards to
+// `System`.
+#![allow(unsafe_code)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

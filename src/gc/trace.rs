@@ -79,8 +79,7 @@ unsafe impl Trace for Value {
     }
 }
 
-// SAFETY: each of these forwards to the contained `Trace` implementations and holds nothing
-// else. Their correctness is the correctness of what they contain.
+// SAFETY: forwards to the referent, which is the only thing a reference owns.
 unsafe impl<T: Trace + ?Sized> Trace for &T {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {
@@ -88,6 +87,7 @@ unsafe impl<T: Trace + ?Sized> Trace for &T {
     }
 }
 
+// SAFETY: reports every element, which is everything a slice owns.
 unsafe impl<T: Trace> Trace for [T] {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {
@@ -97,6 +97,7 @@ unsafe impl<T: Trace> Trace for [T] {
     }
 }
 
+// SAFETY: forwards to the slice impl over every element.
 unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {
@@ -104,6 +105,7 @@ unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
     }
 }
 
+// SAFETY: forwards to the slice impl over every element.
 unsafe impl<T: Trace> Trace for Vec<T> {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {
@@ -111,6 +113,7 @@ unsafe impl<T: Trace> Trace for Vec<T> {
     }
 }
 
+// SAFETY: reports the contained value when there is one; `None` owns nothing.
 unsafe impl<T: Trace> Trace for Option<T> {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {
@@ -120,11 +123,13 @@ unsafe impl<T: Trace> Trace for Option<T> {
     }
 }
 
+// SAFETY: the unit type owns no values, so reporting nothing is complete.
 unsafe impl Trace for () {
     #[inline]
     fn trace(&self, _tracer: &mut Tracer<'_>) {}
 }
 
+// SAFETY: reports both components.
 unsafe impl<A: Trace, B: Trace> Trace for (A, B) {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {
@@ -133,6 +138,7 @@ unsafe impl<A: Trace, B: Trace> Trace for (A, B) {
     }
 }
 
+// SAFETY: reports all three components.
 unsafe impl<A: Trace, B: Trace, C: Trace> Trace for (A, B, C) {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {
@@ -142,6 +148,7 @@ unsafe impl<A: Trace, B: Trace, C: Trace> Trace for (A, B, C) {
     }
 }
 
+// SAFETY: reports all four components.
 unsafe impl<A: Trace, B: Trace, C: Trace, D: Trace> Trace for (A, B, C, D) {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {
@@ -152,6 +159,7 @@ unsafe impl<A: Trace, B: Trace, C: Trace, D: Trace> Trace for (A, B, C, D) {
     }
 }
 
+// SAFETY: reports all five components.
 unsafe impl<A: Trace, B: Trace, C: Trace, D: Trace, E: Trace> Trace for (A, B, C, D, E) {
     #[inline]
     fn trace(&self, tracer: &mut Tracer<'_>) {

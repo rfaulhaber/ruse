@@ -78,6 +78,44 @@ described in `ruse-bytecode-spec.md`.
 - `cargo clippy` - Run linting (clippy available in dev environment)
 - `cargo fmt` - Format code
 
+### Unsafe code and Miri
+
+`unsafe_code` is **denied for the whole package** in `Cargo.toml`. Four files opt out, and
+adding an `unsafe` block anywhere else is a build error rather than a review question:
+
+| File | Why |
+|---|---|
+| `src/gc/mod.rs` | the collector: raw pointers, tag dispatch, `Box::from_raw` on sweep |
+| `src/gc/trace.rs` | the grey worklist, and the `unsafe impl Trace` forwarding impls |
+| `src/value/object.rs` | declarations only — `unsafe impl HeapObject`, no unsafe operations |
+| `tests/gc_drop.rs` | a `GlobalAlloc` implementation is unsafe by definition |
+
+`src/value/mod.rs`, `src/value/layout.rs` and `src/gc/handle.rs` contain no `unsafe` at all;
+the latter two say so with `#![forbid(unsafe_code)]`, which cannot be overridden from within.
+
+`clippy::undocumented_unsafe_blocks` is denied, so every `unsafe` block and every
+`unsafe impl` must carry a `// SAFETY:` comment justifying it. The comment must begin
+literally `SAFETY:` for the lint to see it.
+
+- `nix run .#miri` - Run the test suite under Miri, in **both** aliasing models (Stacked
+  Borrows and Tree Borrows), with leak checking on. Extra arguments are forwarded, so
+  `nix run .#miri -- gc::tests::cycles` filters. This is what CI's gating Miri job runs.
+
+Miri needs nightly, pinned in `nightly-toolchain.toml`; `flake.nix` and the CI job both read
+that file, so a local run and CI use the same compiler. Bump it deliberately alongside the
+`rust-overlay` input in `flake.lock`.
+
+Miri reports one *integer-to-pointer cast* advisory at `Value::header_ptr`. That is inherent
+to NaN-boxing — strict provenance cannot express packing a pointer into 48 bits of an
+integer — so the code uses `expose_provenance`/`with_exposed_provenance_mut` rather than bare
+`as` casts, which keeps everything downstream of the cast checkable. `-Zmiri-permissive-provenance`
+silences the advisory; do not "fix" it by reaching for strict provenance.
+
+Two tests are Miri-aware: `a_very_long_list_marks_without_recursing` shrinks its list under
+`cfg!(miri)` (the full size would take hours interpreted), and the test that deliberately
+`mem::forget`s a pin scope is `#[cfg_attr(miri, ignore)]` because Miri's leak checker is
+correct to flag it.
+
 ### Nix Integration
 - `nix develop` - Enter development shell with all dependencies
 - `nix build` - Build the project using Nix

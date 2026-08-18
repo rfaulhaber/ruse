@@ -34,6 +34,10 @@
 //! caught rather than silently aliasing. Drop order stops mattering, and a leaked scope
 //! over-roots — which wastes memory but is safe — instead of under-rooting, which is not.
 
+// Re-tightens the `allow` its parent module needs. Pinning is ordinary safe Rust — slots,
+// indices and a generation counter — and it should stay that way.
+#![forbid(unsafe_code)]
+
 use std::cell::RefCell;
 
 use crate::value::Value;

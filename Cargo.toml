@@ -11,8 +11,17 @@ num-traits = "0.2"
 rustyline = "18"
 thiserror = "2"
 
+# Unsafe is denied for the whole package and re-enabled, file by file, only where it is
+# unavoidable: `src/gc/mod.rs` (the collector), `src/gc/trace.rs` (the grey worklist),
+# `src/value/object.rs` (trait declarations only) and `tests/gc_drop.rs`. Adding an unsafe
+# block anywhere else is a build error rather than a review question.
+[lints.rust]
+unsafe_code = "deny"
+
 [lints.clippy]
 disallowed_types = "deny"
+# Every unsafe block must carry a `// SAFETY:` comment saying why it is sound.
+undocumented_unsafe_blocks = "deny"
 disallowed_methods = "deny"
 unwrap_used = "deny"
 expect_used = "deny"

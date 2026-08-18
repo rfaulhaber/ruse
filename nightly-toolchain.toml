@@ -1,0 +1,10 @@
+# The nightly used for Miri, which needs one and cannot run on the pinned stable channel.
+#
+# Pinned to an exact date for the same reason `rust-toolchain.toml` is: the Miri job gates
+# CI, so a floating `nightly` would let an upstream regression fail builds on commits that
+# changed no code. Bump deliberately, together with the `rust-overlay` input in flake.lock —
+# `nix run .#miri` reads this file through `rust-bin.fromRustupToolchainFile`, and the CI
+# job reads the channel out of it, so the two stay on the same compiler.
+[toolchain]
+channel = "nightly-2026-08-18"
+components = ["miri", "rust-src"]

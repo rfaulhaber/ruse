@@ -138,7 +138,16 @@ buffers; ~eq?~ on interned symbols is pointer identity. 67 tests and 7 doctests 
 ~cargo nextest run --all-targets~, with ~cargo clippy --all-targets -- -D warnings~ and
 ~cargo fmt --all -- --check~ clean, and ~nix build~ green with the two new dependencies.
 
-The unsafe half was checked under Miri (nightly via ~rust-overlay~, not part of CI):
+The unsafe half is checked under Miri, which is now wired into the repo and gates CI —
+~nix run .#miri~ locally, a ~Miri~ job in =.github/workflows/ci.yml=, both reading the nightly
+channel from =nightly-toolchain.toml= so they cannot drift apart. Alongside it, ~unsafe_code~
+is denied for the whole package and re-enabled in exactly four files (=src/gc/mod.rs=,
+=src/gc/trace.rs=, =src/value/object.rs=, =tests/gc_drop.rs=), with
+~clippy::undocumented_unsafe_blocks~ requiring a ~// SAFETY:~ justification on every block
+and every ~unsafe impl~. =src/value/layout.rs= and =src/gc/handle.rs= carry
+~#![forbid(unsafe_code)]~, which cannot be overridden from within.
+
+The run itself:
 =cargo miri test --lib= passes under *both* aliasing models — default Stacked Borrows and
 ~-Zmiri-tree-borrows~ — covering the ~Box::into_raw~/~from_raw~ round trip, the header casts,
 the sweep, and the pin shadow stack. Miri's leak checker passes too, which is the independent

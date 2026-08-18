@@ -44,6 +44,55 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  # Miri interprets the crate and checks what the type system cannot: that the collector's
+  # raw-pointer half has no undefined behaviour, no aliasing violation and no leak. It is a
+  # gating job because `src/gc/` is the only place in the crate allowed to write `unsafe`,
+  # and a mark-sweep collector is exactly the kind of code whose bugs pass every unit test.
+  #
+  # Both of Miri's aliasing models run: Stacked Borrows is the default, Tree Borrows is the
+  # successor model and accepts a different set of programs, so passing under both is a
+  # stronger claim than either alone. Leak checking stays on — it is what proves
+  # `Drop for Heap` actually releases everything.
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Miri needs nightly, which rust-toolchain.toml cannot provide. The channel is pinned
+      # in nightly-toolchain.toml so an upstream nightly regression cannot fail this job on
+      # a commit that changed no code, and `nix run .#miri` reads the same file, so a local
+      # run and this job use the same compiler.
+      - name: Read the pinned nightly channel
+        id: nightly
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' nightly-toolchain.toml)
+          test -n "$channel" || { echo "no channel in nightly-toolchain.toml"; exit 1; }
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Overrides rust-toolchain.toml, which pins the stable channel this crate builds on.
+          toolchain: ${{ steps.nightly.outputs.channel }}
+          components: miri
+          cache-directories: ~/.cache/miri
+
+      # NaN-boxing packs a pointer into 48 bits of an integer, which strict provenance cannot
+      # express. The code uses expose_provenance/with_exposed_provenance_mut so the
+      # exposed-provenance model applies and everything downstream of the cast is still
+      # checked; the flag only silences the per-run advisory.
+      - name: Miri (Stacked Borrows)
+        run: cargo miri test --lib
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.nightly.outputs.channel }}
+          MIRIFLAGS: -Zmiri-permissive-provenance
+
+      - name: Miri (Tree Borrows)
+        run: cargo miri test --lib
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.nightly.outputs.channel }}
+          MIRIFLAGS: -Zmiri-permissive-provenance -Zmiri-tree-borrows
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
