@@ -36,7 +36,7 @@
 use core::mem::{align_of, offset_of, size_of};
 
 use crate::value::object::{
-    Bignum, Bytevector, Pair, Record, RecordType, Str, Symbol, UpvalueCell, Vector,
+    Bignum, Bytevector, Closure, Pair, Record, RecordType, Str, Symbol, UpvalueCell, Vector,
 };
 
 /// Bits set in every boxed value: the sign bit, the eleven exponent bits and the quiet-NaN
@@ -118,10 +118,7 @@ pub enum HeapTag {
     Vector = 3,
     /// [`Bytevector`]: a mutable vector of octets.
     Bytevector = 4,
-    /// A closure over a compiled prototype.
-    ///
-    /// The object itself lands with `Proto` in M2; the tag is reserved now so the numbering
-    /// never has to move. Nothing can allocate one yet.
+    /// [`Closure`]: a compiled prototype plus its captured variables.
     Closure = 5,
     /// [`UpvalueCell`]: the shared box a captured variable lives in.
     UpvalueCell = 6,
@@ -232,6 +229,7 @@ const _: () = {
     assert!(offset_of!(Symbol, header) == 0);
     assert!(offset_of!(Vector, header) == 0);
     assert!(offset_of!(Bytevector, header) == 0);
+    assert!(offset_of!(Closure, header) == 0);
     assert!(offset_of!(UpvalueCell, header) == 0);
     assert!(offset_of!(Bignum, header) == 0);
     assert!(offset_of!(Record, header) == 0);
@@ -247,6 +245,8 @@ const _: () = {
     assert!(offset_of!(Symbol, interned) == 32);
     assert!(offset_of!(Vector, elems) == 16);
     assert!(offset_of!(Bytevector, bytes) == 16);
+    assert!(offset_of!(Closure, proto) == 16);
+    assert!(offset_of!(Closure, upvals) == 24);
     assert!(offset_of!(UpvalueCell, value) == 16);
     assert!(offset_of!(Bignum, value) == 16);
     assert!(offset_of!(Record, rtype) == 16);

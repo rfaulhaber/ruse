@@ -79,6 +79,25 @@ unsafe impl Trace for Value {
     }
 }
 
+// SAFETY: `trace_values` reports every constant in the prototype tree, which are the only
+// `Value`s a prototype owns. The M3 compiler and VM root in-flight prototypes through
+// this impl before any closure exists to keep them alive.
+unsafe impl Trace for crate::bytecode::Proto {
+    #[inline]
+    fn trace(&self, tracer: &mut Tracer<'_>) {
+        self.trace_values(tracer);
+    }
+}
+
+// SAFETY: forwards to the referent, which is the only thing an `Rc` owns. Shared
+// ownership only over-reports, never under-reports.
+unsafe impl<T: Trace + ?Sized> Trace for std::rc::Rc<T> {
+    #[inline]
+    fn trace(&self, tracer: &mut Tracer<'_>) {
+        (**self).trace(tracer);
+    }
+}
+
 // SAFETY: forwards to the referent, which is the only thing a reference owns.
 unsafe impl<T: Trace + ?Sized> Trace for &T {
     #[inline]

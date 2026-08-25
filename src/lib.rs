@@ -12,6 +12,8 @@
 )]
 
 pub mod ast;
+pub mod bytecode;
+pub mod disasm;
 pub mod gc;
 pub mod lexer;
 pub mod parser;
@@ -20,6 +22,7 @@ pub mod value;
 pub mod vm;
 
 pub use ast::Expr;
+pub use bytecode::{Insn, Op, Proto};
 pub use gc::Heap;
 pub use lexer::{LexError, Lexer, Token, TokenIterator, TokenKind};
 pub use parser::{ParseError, Parser};

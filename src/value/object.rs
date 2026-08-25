@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 
+use crate::bytecode::Proto;
 use crate::gc::Tracer;
 use crate::value::Value;
 use crate::value::layout::{GcHeader, HeapTag};
@@ -292,6 +293,62 @@ unsafe impl HeapObject for Bytevector {
 
     fn extra_bytes(&self) -> usize {
         self.bytes.capacity()
+    }
+}
+
+/// A closure: a compiled prototype plus the captured variables it runs over.
+///
+/// The prototype is shared by `Rc` — every closure over one `lambda` executes the same
+/// immutable [`Proto`] — and it is not itself a heap object, so the closure is what makes
+/// the prototype's constants reachable: `trace_fields` walks the whole prototype tree.
+///
+/// `upvals` holds one value per entry in the prototype's descriptor table: the closure's
+/// view of each captured binding. In the settled M4 design these are [`UpvalueCell`]s
+/// (shared, so `set!` through one closure is visible through another); the open/closed
+/// upvalue mechanics live in the VM, not here.
+#[repr(C)]
+pub struct Closure {
+    pub(crate) header: GcHeader,
+    /// The compiled function this closure executes.
+    pub proto: Rc<Proto>,
+    /// The captured bindings, in the prototype's upvalue order.
+    pub upvals: Vec<Value>,
+}
+
+impl Closure {
+    pub(crate) fn new(proto: Rc<Proto>, upvals: Vec<Value>) -> Self {
+        Self {
+            header: GcHeader::unlinked(HeapTag::Closure),
+            proto,
+            upvals,
+        }
+    }
+}
+
+impl Header for Closure {
+    fn header_mut(&mut self) -> &mut GcHeader {
+        &mut self.header
+    }
+}
+
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. `trace_fields` reports every captured value and every
+// constant in the prototype tree, which together are all the `Value`s reachable from a closure.
+unsafe impl HeapObject for Closure {
+    const TAG: HeapTag = HeapTag::Closure;
+
+    fn trace_fields(&self, tracer: &mut Tracer<'_>) {
+        for &v in &self.upvals {
+            tracer.mark(v);
+        }
+        self.proto.trace_values(tracer);
+    }
+
+    fn extra_bytes(&self) -> usize {
+        // Only what this closure uniquely owns. The prototype is shared, so charging its
+        // size to every closure over it would inflate the collection trigger; the price
+        // is that a sole-owner closure under-reports, which only delays a collection.
+        self.upvals.capacity() * size_of::<Value>()
     }
 }
 

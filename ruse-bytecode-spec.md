@@ -46,7 +46,7 @@ Full detail lives in the RUVM spec; this section fixes only what the ISA depends
 
 ## 3. Instruction Encoding
 
-All instructions are 32 bits, stored little-endian. The opcode occupies the low 8 bits, giving 256 opcode slots (RBC-1 defines 56). Four formats:
+All instructions are 32 bits, stored little-endian. The opcode occupies the low 8 bits, giving 256 opcode slots (RBC-1 defines 50; see §5 for the frozen assignment). Four formats:
 
 ```
  31              24 23              16 15               8 7                0
@@ -66,7 +66,7 @@ All instructions are 32 bits, stored little-endian. The opcode occupies the low 
 - **iAsBx** — register + 16-bit signed offset (jumps, small integer literals). `sBx` is two's complement; jump range is ±32,767 instructions. The compiler is responsible for splitting functions that exceed this (in practice, never).
 - **iAx** — single 24-bit operand, used only by `EXTRAARG`.
 
-Some iABC instructions interpret a field as a **signed** byte (written `sC`) or as a **flag** (written `k`, value 0 or 1). This is noted per-instruction.
+Some iABC instructions interpret a field as a **signed** byte (written `sC`) or as a **flag** (written `k`, value 0 or 1). This is noted per-instruction. Two conventions are frozen across the set: the skip-family flag `k` always lives in field **C** (including `TEST`), and any field an instruction does not use must encode as **zero** — every instruction has exactly one canonical encoding, which the load-time verifier enforces.
 
 ### 3.1 Rust representation
 
@@ -89,6 +89,8 @@ impl Insn {
 
 The dispatch loop is a `loop { match insn.op() { … } }`. Stable Rust cannot yet guarantee computed-goto/tail-call dispatch; a well-shaped match on a dense `u8` compiles to a jump table, which is acceptable for RBC-1. Revisit with `become` (explicit tail calls) when stabilized.
 
+The canonical implementation is `src/bytecode/insn.rs`, which pairs these accessors with the symmetric encoders `iabc`/`iabx`/`iasbx`/`iax`.
+
 ### 3.2 The skip-next convention
 
 Comparison instructions do not produce boolean values or carry jump targets. Instead, following Lua: a comparison evaluates its condition against the `k` flag, and **if the condition ≠ k, the next instruction is skipped**. The next instruction is, by compiler convention, always a `JMP`. This keeps comparisons in iABC format (two full register operands) while allowing 16-bit jump ranges, at the cost of two instruction slots per branch — a good trade, since the not-taken path falls through in one dispatch.
@@ -96,11 +98,11 @@ Comparison instructions do not produce boolean values or carry jump targets. Ins
 When Scheme source needs a comparison *as a value* — `(define x (< a b))` — the compiler synthesizes it:
 
 ```
-NUMLT  1, ra, rb     ; if a < b is not-true, skip next
-JMP    +2
-LOADIMM rx, FALSE
-JMP    +1
-LOADIMM rx, TRUE
+NUMLT   r1, r2, 1      ; if (< r1 r2), fall into the JMP; otherwise skip it
+JMP     +2             ; -> the #t branch
+LOADIMM r0, #f
+JMP     +1             ; skip the #t branch
+LOADIMM r0, #t
 ```
 
 (or the shorter `LOADIMM`/skip pattern; codegen's choice). This is rarer than branching in real code, which is why branching gets the fast encoding.
@@ -109,7 +111,7 @@ LOADIMM rx, TRUE
 
 ## 4. The Instruction Set
 
-56 opcodes in nine functional groups. Notation: `R[x]` is register x in the current window; `K[x]` is constant-pool entry x; `U[x]` is upvalue x of the running closure; `G[x]` is the global slot named by `K[x]`; `PC` is the program counter (points at the *next* instruction). `RA`/`RB`/`RC` abbreviate `R[A]`/`R[B]`/`R[C]`.
+50 opcodes in ten functional groups. Notation: `R[x]` is register x in the current window; `K[x]` is constant-pool entry x; `U[x]` is upvalue x of the running closure; `G[x]` is the global slot named by `K[x]`; `PC` is the program counter (points at the *next* instruction). `RA`/`RB`/`RC` abbreviate `R[A]`/`R[B]`/`R[C]`.
 
 ### 4.1 Data movement (5)
 
@@ -118,7 +120,7 @@ LOADIMM rx, TRUE
 | `MOVE A B` | iABC | `RA := RB`. Register-to-register copy. |
 | `LOADK A Bx` | iABx | `RA := K[Bx]`. Load constant. |
 | `LOADKX A` | iABx | `RA := K[Ax]` where Ax comes from a following `EXTRAARG`. For >64K constant pools. |
-| `LOADIMM A Bx` | iABx | `RA :=` immediate singleton selected by Bx (`0=#f 1=#t 2='() 3=unspecified 4=eof 5=undefined`). No constant-pool slot needed for these. |
+| `LOADIMM A Bx` | iABx | `RA :=` immediate singleton selected by Bx. The operand **is** the singleton ordinal defined in `src/value/layout.rs` (`0=undefined 1=unspecified 2='() 3=eof 4=#f 5=#t`) — that file is the single source of truth, and there is no second table to drift from it. No constant-pool slot needed for these. |
 | `LOADI A sBx` | iAsBx | `RA :=` the fixnum `sBx`. Small integer literals (−32768..32767) without a pool entry. |
 
 `undefined` (slot 5) is the letrec "black hole" — bound but not yet initialized. Referencing it raises an error; this is how RBC-1 detects `(letrec ((x (+ x 1))) x)` at runtime.
@@ -207,7 +209,7 @@ The calling-convention core. `B` encodes argument count as `B−1` (so `B=0` mea
 
 | Op | Format | Effect |
 |----|--------|--------|
-| `CLOSURE A Bx` | iABx | `RA :=` new closure over child prototype `Bx`. Following pseudo-instructions (`MOVE`/`GETUPVAL` with a special encoding) describe each upvalue's capture source — Lua's pattern. Captures from the enclosing frame become *open* upvalues. |
+| `CLOSURE A Bx` | iABx | `RA :=` new closure over child prototype `Bx`. Each upvalue's capture source is described by the **child prototype's own descriptor table** (`UpvalDesc`: parent-local register or parent upvalue, in upvalue order) — Lua 5.4's pattern, not 5.1's trailing pseudo-instructions. Captures from the enclosing frame become *open* upvalues. |
 | `GETUPVAL A B` | iABC | `RA := U[B]`. Read a captured variable. |
 | `SETUPVAL A B` | iABC | `U[B] := RA`. Mutate a captured variable (`set!` on a closed-over binding). Write barrier. |
 | `GETGLOBAL A Bx` | iABx | `RA := G[K[Bx]]`. Top-level/library binding read. Signals unbound-variable error if the slot is undefined. |
@@ -241,13 +243,13 @@ Globals are resolved to integer slots at link time; `K[Bx]` holds the symbol for
 
 Continuation invocation interacts with the wind stack exactly as R7RS §6.10 specifies: the VM computes the common ancestor of the current and target wind-stack states and runs the appropriate `after`/`before` thunks while unwinding/rewinding. This logic lives in the VM's continuation-restore routine, not in bytecode.
 
-The concurrency opcodes from the RUVM spec (`SPAWN`, `YIELD`, `RESUME`, `CHANMAKE`, `CHANSEND`, `CHANRECV`) are **deferred to RBC-2**. They depend on the fiber scheduler, which postdates a working sequential VM. Reserving their opcode numbers now (slots 56–61) prevents renumbering churn later.
+The concurrency opcodes from the RUVM spec (`SPAWN`, `YIELD`, `RESUME`, `CHANMAKE`, `CHANSEND`, `CHANRECV`) are **deferred to RBC-2**. They depend on the fiber scheduler, which postdates a working sequential VM. Reserving their opcode numbers now (`0x40`–`0x45`) prevents renumbering churn later.
 
 ---
 
 ## 5. Opcode Number Assignment
 
-Dense numbering keeps the dispatch jump table compact. Grouped so related ops share cache lines in the match arms.
+This table is **frozen** — it is the discriminant list of the `Op` enum in `src/bytecode/op.rs`, finalized when the decoder was written. Grouped so related ops share cache lines in the match arms; the gaps (`0x0C`–`0x0F`, `0x1E`–`0x1F`, `0x2A`–`0x2F`, `0x3E`–`0x3F`) are room for each group to grow without renumbering its neighbours.
 
 ```
 0x00 MOVE        0x10 NUMEQ       0x20 CADR        0x30 GETGLOBAL
@@ -260,20 +262,23 @@ Dense numbering keeps the dispatch jump table compact. Grouped so related ops sh
 0x07 MUL         0x17 EXTRAARG    0x27 CLOSURE     0x37 PRIMCALL
 0x08 DIV         0x18 JMPIDX      0x28 GETUPVAL    0x38 CAPTURECC
 0x09 QUOT        0x19 CONS        0x29 SETUPVAL    0x39 WINDPUSH
-0x0A NEG         0x1A CAR                          0x3A WINDPOP
-0x0B ADDI        0x1B CDR                          0x3B HANDLERPUSH
-                 0x1C SETCAR                       0x3C HANDLERPOP
-                 0x1D SETCDR                       0x3D RAISE
-                 0x1E (reserved)                   0x3E RAISE-aux/reserved
-                 0x1F (reserved)
-0x38..0x3D as above; 0x40..0x45 reserved for RBC-2 concurrency.
+0x0A NEG         0x1A CAR         0x2A (reserved)  0x3A WINDPOP
+0x0B ADDI        0x1B CDR         ...              0x3B HANDLERPUSH
+0x0C (reserved)  0x1C SETCAR      0x2F (reserved)  0x3C HANDLERPOP
+...              0x1D SETCDR                       0x3D RAISE
+0x0F (reserved)  0x1E (reserved)                   0x3E (reserved)
+                 0x1F (reserved)                   0x3F (reserved)
+
+0x40..0x45 reserved for RBC-2 concurrency.
 ```
 
-(Exact byte values are illustrative; finalize when the decoder is written. The grouping intent is what matters.)
+Renumbering, should it ever be needed, is deliberately cheap: nothing outside `src/bytecode/op.rs` matches on raw bytes, and every test asserts on disassembly text — never on instruction words.
 
 ---
 
 ## 6. Worked Compilations
+
+These listings are the disassembler's own output for hand-assembled prototypes, verified by the load-time verifier and frozen as `insta` snapshots in `tests/disasm.rs`. They supersede this spec's earlier schematic sketches, which took liberties (constants in register operands, approximate offsets) that a real encoding cannot.
 
 ### 6.1 Tail-recursive factorial
 
@@ -282,21 +287,19 @@ Dense numbering keeps the dispatch jump table compact. Grouped so related ops sh
   (if (= n 0) acc (fact (- n 1) (* n acc))))
 ```
 
-Prototype `fact` (nparams=2: R0=n, R1=acc):
-
 ```
-        NUMEQ   0, K0, 0       ; K0 = fixnum 0; if (= n 0) ≠ true, skip
-        JMP     +2             ;   (n ≠ 0) → recur
-        RETURN1 1              ;   (n = 0) → return acc
-        ; recur:
-        SUB     2, 0, K0'      ; R2 = n - 1   (K0' = fixnum 1)
-        MUL     3, 0, 1        ; R3 = n * acc
-        MOVE    1, 3           ; set up args: R[base+1]=acc'
-        MOVE    0, 2           ;              R[base+0]=n'  (callee in R-1 conceptually)
-        TAILCALL ?, 3          ; reuse frame; 2 args
+; proto fact: nparams=2 has_rest=false window=5 consts=2 upvals=0 protos=0
+0000  LOADK       r2, k0                ; 0
+0001  NUMEQ       r0, r2, 0             ; skip if (= r0 r2)
+0002  JMP         +1                    ; -> 0004
+0003  RETURN1     r1
+0004  GETGLOBAL   r2, k1                ; fact
+0005  ADDI        r3, r0, -1
+0006  MUL         r4, r0, r1
+0007  TAILCALL    r2, 3                 ; 2 args
 ```
 
-(Real codegen lays out the call window so the callee and args are contiguous; the `MOVE`s above are schematic. The point: `TAILCALL` means this runs in constant stack space — mandatory, not optional.)
+Notes on the derivation: `NUMEQ` compares two registers, so the constant `0` is loaded first; its `k` flag is `0`, so the `JMP` to the recursive arm executes when `(= n 0)` is *false* and is skipped — falling into `RETURN1 acc` — when it is true. `(- n 1)` is `ADDI -1`. The callee and both arguments are laid out contiguously in `r2..r4`, so `TAILCALL` reuses the frame with no shuffling: constant stack space, mandatory, not optional.
 
 ### 6.2 A closure capturing a variable
 
@@ -306,26 +309,22 @@ Prototype `fact` (nparams=2: R0=n, R1=acc):
     (lambda () (set! n (+ n 1)) n)))
 ```
 
-`make-counter` body:
-
 ```
-        LOADI    0, 0          ; R0 = n = 0
-        CLOSURE  1, P_inner    ; R1 = closure over inner prototype
-          ; upvalue descriptor follows: capture local R0 as open upvalue
-        CLOSEUPVALS 0          ; n escapes; close it into the upvalue cell
-        RETURN1  1
-```
+; proto make-counter: nparams=0 has_rest=false window=2 consts=0 upvals=0 protos=1
+0000  LOADI       r0, 0
+0001  CLOSURE     r1, p0
+0002  CLOSEUPVALS r0
+0003  RETURN1     r1
 
-`P_inner` (no params; one upvalue U0 = n):
-
-```
-        GETUPVAL 0, 0          ; R0 = n
-        ADDI     0, 0, 1       ; R0 = n + 1
-        SETUPVAL 0, 0          ; n := R0   (mutates the shared cell)
-        RETURN1  0
+; proto make-counter.p0: nparams=0 has_rest=false window=1 consts=0 upvals=1 protos=0
+;   u0 <- parent local r0
+0000  GETUPVAL    r0, u0
+0001  ADDI        r0, r0, 1
+0002  SETUPVAL    r0, u0                ; u0 := r0
+0003  RETURN1     r0
 ```
 
-The upvalue starts *open* (pointing at `make-counter`'s R0); `CLOSEUPVALS` copies it to a heap cell when the frame exits, so the counter persists. Two counters get independent cells.
+The capture is described by the child prototype's descriptor table (`u0 <- parent local r0`), read by `CLOSURE` — there are no trailing pseudo-instructions. The upvalue starts *open* (pointing at `make-counter`'s `r0`); `CLOSEUPVALS 0` moves it into a heap cell as the frame exits, so the counter persists and two counters get independent cells.
 
 ### 6.3 call/cc escape
 
@@ -334,16 +333,20 @@ The upvalue starts *open* (pointing at `make-counter`'s R0); `CLOSEUPVALS` copie
 ```
 
 ```
-        LOADI    1, 1          ; R1 = 1
-        CLOSURE  2, P_lambda   ; R2 = (lambda (k) (k 10))
-        CAPTURECC 3            ; R3 = current continuation k
-        MOVE     2+1, 3        ; pass k as the lambda's argument
-        CALL     2, 2, 2       ; call lambda with 1 arg, want 1 result → R2
-        ADD      0, 1, 2       ; R0 = 1 + result
-        RETURN1  0
+; proto main: nparams=0 has_rest=false window=4 consts=0 upvals=0 protos=1
+0000  LOADI       r1, 1
+0001  CLOSURE     r2, p0
+0002  CAPTURECC   r3
+0003  CALL        r2, 2, 2              ; 1 arg, 1 result
+0004  ADD         r0, r1, r2
+0005  RETURN1     r0
+
+; proto main.p0: nparams=1 has_rest=false window=2 consts=0 upvals=0 protos=0
+0000  LOADI       r1, 10
+0001  TAILCALL    r0, 2                 ; 1 arg
 ```
 
-Inside `P_lambda`, `(k 10)` is `CALL`ing the continuation object — the VM recognizes the callee as a continuation and restores the snapshot, delivering 10 to the `ADD`. Result: 11.
+`CAPTURECC` writes the continuation directly into `r3` — the call's argument slot — so no `MOVE` is needed. Inside the lambda, `(k 10)` is in tail position and the continuation is an ordinary callable, so invoking it is a `TAILCALL`; the VM recognizes the callee as a continuation and restores the snapshot, delivering 10 to the `ADD`. Result: 11.
 
 ---
 
@@ -353,5 +356,5 @@ Inside `P_lambda`, `(k 10)` is `CALL`ing the continuation object — the VM reco
 2. **`TYPEP` type enum** — finalize the integer assignments and whether disjoint-type fast checks (pair/null/fixnum) get a branch ahead of the general table lookup.
 3. **Global slot table growth** — REPL redefinition needs slots to be append-only and stable. Decide whether library boundaries get separate slot namespaces.
 4. **`DIV` policy** — confirm with the numeric-tower design that the "divides evenly" fast path is worth the branch, or whether `DIV` should always go to the runtime and `QUOT` carries the fast integer path alone.
-5. **Line-info table format** — out of scope here, but the prototype needs it for `error` source locations before the compiler is useful for debugging.
+5. **Line-info table format** — provisionally answered in M2: `Proto.spans` is a per-instruction table of source byte spans (empty when debug info is stripped), because the reader already produces byte spans and miette consumes them directly. A compressed encoding can replace the representation behind that field if it ever matters; revisit before the compiler emits it at scale.
 

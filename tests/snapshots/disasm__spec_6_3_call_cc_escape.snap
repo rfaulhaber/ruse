@@ -1,0 +1,15 @@
+---
+source: tests/disasm.rs
+expression: "disassemble(&heap, &proto)"
+---
+; proto main: nparams=0 has_rest=false window=4 consts=0 upvals=0 protos=1
+0000  LOADI       r1, 1
+0001  CLOSURE     r2, p0
+0002  CAPTURECC   r3
+0003  CALL        r2, 2, 2              ; 1 arg, 1 result
+0004  ADD         r0, r1, r2
+0005  RETURN1     r0
+
+; proto main.p0: nparams=1 has_rest=false window=2 consts=0 upvals=0 protos=0
+0000  LOADI       r1, 10
+0001  TAILCALL    r0, 2                 ; 1 arg

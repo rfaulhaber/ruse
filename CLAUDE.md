@@ -19,26 +19,65 @@ Standard Cargo layout — sources live in `src/`:
   - `src/value/layout.rs` - **The memory map.** Every NaN-box mask, tag constant and heap-object
     field offset is defined here exactly once, with `const` assertions enforcing the layout
   - `src/value/mod.rs` - `Value`, the NaN-boxed 64-bit word
-  - `src/value/object.rs` - The `repr(C)` heap objects and the `HeapObject` trait
+  - `src/value/object.rs` - The `repr(C)` heap objects (including `Closure`) and the
+    `HeapObject` trait
 - `src/gc/` - The heap and collector
   - `src/gc/mod.rs` - `Heap`: allocation, symbol interning, mark-sweep, `Drop`-on-sweep
   - `src/gc/trace.rs` - The `Trace` root trait and the grey worklist `Tracer`
   - `src/gc/handle.rs` - The pin shadow stack for native-procedure temporaries
+- `src/bytecode/` - The RBC-1 bytecode layer (M2)
+  - `src/bytecode/op.rs` - **The frozen opcode table.** `Op` (`repr(u8)`), 50 opcodes; the
+    discriminants are the byte assignments, defined nowhere else
+  - `src/bytecode/insn.rs` - `Insn(u32)`: spec §3.1 accessors and the symmetric
+    `iabc`/`iabx`/`iasbx`/`iax` encoders
+  - `src/bytecode/proto.rs` - `Proto` (code, constants, `UpvalDesc` capture tables, child
+    protos, arity/window metadata, provisional span table), shared by `Rc`
+  - `src/bytecode/verify.rs` - The load-time verifier; everything the VM will trust is
+    checked here once
+- `src/disasm.rs` - The disassembler; its text output is the frozen test surface for all
+  bytecode (tests snapshot it and never assert on raw bytes)
 - `src/cli.rs` - clap-derived argument parser
 - `src/repl.rs` - Parse-only REPL (no evaluation yet)
 - `src/vm.rs` - Register-VM module (currently an empty placeholder)
 - `tests/gc_drop.rs` - Global-allocator proof that sweeping runs `Drop`, not just `dealloc`
+- `tests/disasm.rs` - `insta` snapshots of the derived spec §6 compilations plus
+  all-opcode and malformed-input listings (snapshots in `tests/snapshots/`)
 - `tests/r7rs_suite/r7rs.scm` - R7RS compliance test suite (not yet wired into the build)
 - `ruse-bytecode-spec.md` - **RBC-1**, the target bytecode ISA (Lua-style register VM); the implementation goal
 - Project uses Nix flakes for the development environment
 
 ### Current status
 
-Reader plus runtime foundation (M0–M1 complete). The lexer and parser produce an `Expr`
-AST; `Value` and the collector exist underneath, but nothing connects them yet. There is
-still no evaluator, bytecode compiler, VM, numeric tower, macro expander, or standard
-library. The goal is a bytecode-compiled R7RS implementation targeting the register VM
-described in `ruse-bytecode-spec.md`.
+Reader, runtime foundation, and the bytecode layer (M0–M2 complete). The lexer and parser
+produce an `Expr` AST; `Value` and the collector exist underneath; the RBC-1 instruction
+encoding, the frozen 50-opcode table, `Proto`, the load-time verifier and the disassembler
+are in place, with the spec's §6 worked examples derived, verified and snapshot-frozen.
+Nothing executes yet: there is still no evaluator, bytecode compiler, VM, numeric tower,
+macro expander, or standard library — M3's dispatch loop and codegen are what first
+connect the reader to the runtime. The goal is a bytecode-compiled R7RS implementation
+targeting the register VM described in `ruse-bytecode-spec.md`.
+
+### Bytecode invariants (M2)
+
+- **The opcode byte table is frozen** as the `Op` discriminants in `src/bytecode/op.rs`
+  (the spec §5 grouped table: `0x00`–`0x3D` with aligned gaps, `0x40`–`0x45` reserved for
+  RBC-2). Renumbering is cheap *only* because tests key on disassembly text — never assert
+  on raw instruction words.
+- **Canonical encodings**: the skip-family `k` flag always lives in field C (including
+  `TEST`); fields an opcode does not use must encode as zero; the verifier enforces both.
+- **`LOADIMM`'s operand is the `src/value/layout.rs` singleton ordinal** (0=undefined
+  1=unspecified 2=`'()` 3=eof 4=`#f` 5=`#t`). There is no second table.
+- **Upvalue capture is data, not code**: `CLOSURE` reads the child `Proto`'s `UpvalDesc`
+  table (Lua 5.4's pattern); there are no trailing pseudo-instructions.
+- **`CADR`'s path byte and `TYPEP`'s selector are deliberately unfrozen** (plan open
+  questions 1–2); the verifier passes their C field through unchecked until VM and
+  compiler freeze them jointly.
+- **A `Proto` is not a heap object.** It is immutable, `Rc`-shared, and acyclic by
+  construction; a `Closure` (or, in M3, the VM's root set) is what keeps its constants
+  alive, by tracing the whole prototype tree via `Proto::trace_values`.
+- The verifier is the trust boundary: the M3 dispatch loop may assume any verified
+  prototype's static operands are in bounds, but `JMPIDX`'s computed target is a runtime
+  value and must be bounds-checked at execution time.
 
 ### Value and GC invariants (M1)
 
@@ -73,6 +112,10 @@ described in `ruse-bytecode-spec.md`.
 ### Testing
 - `cargo test` - Run standard tests
 - `cargo nextest run` - Run tests with nextest (available in dev environment)
+- Disassembly is snapshot-tested with `insta` (`tests/disasm.rs`, snapshots in
+  `tests/snapshots/`). After an intentional output change, regenerate with
+  `INSTA_UPDATE=always cargo test --test disasm` and review the diff; snapshots are
+  committed, so CI and `nix build` fail on drift
 
 ### Code Quality
 - `cargo clippy` - Run linting (clippy available in dev environment)

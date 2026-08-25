@@ -1,0 +1,13 @@
+---
+source: tests/disasm.rs
+expression: "disassemble(&heap, &proto)"
+---
+; proto fact: nparams=2 has_rest=false window=5 consts=2 upvals=0 protos=0
+0000  LOADK       r2, k0                ; 0
+0001  NUMEQ       r0, r2, 0             ; skip if (= r0 r2)
+0002  JMP         +1                    ; -> 0004
+0003  RETURN1     r1
+0004  GETGLOBAL   r2, k1                ; fact
+0005  ADDI        r3, r0, -1
+0006  MUL         r4, r0, r1
+0007  TAILCALL    r2, 3                 ; 2 args

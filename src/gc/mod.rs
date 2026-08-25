@@ -32,11 +32,12 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
+use crate::bytecode::Proto;
 use crate::value::Value;
 use crate::value::layout::{Color, GcHeader, HeapTag};
 use crate::value::object::{
-    Bignum, Bytevector, HeapObject, Pair, Record, RecordType, Str, Symbol, UpvalueCell, Vector,
-    set_header,
+    Bignum, Bytevector, Closure, HeapObject, Pair, Record, RecordType, Str, Symbol, UpvalueCell,
+    Vector, set_header,
 };
 
 /// Floor for the collection threshold: below this, collecting costs more than the memory it
@@ -193,6 +194,23 @@ impl Heap {
     /// Allocate a closed upvalue cell holding `value`.
     pub fn upvalue_cell(&mut self, value: Value) -> Value {
         self.alloc(UpvalueCell::new(value))
+    }
+
+    /// Allocate a closure over `proto`, capturing `upvals` — exactly one value per entry
+    /// in the prototype's descriptor table, in order. That arity is the invariant the
+    /// verifier's `GETUPVAL`/`SETUPVAL` bounds checks stand on, so it is asserted in
+    /// debug builds.
+    ///
+    /// The closure is what keeps the prototype's constants alive: tracing it walks the
+    /// whole prototype tree. A `Proto` no closure or other root reaches does not protect
+    /// its constants from collection.
+    pub fn closure(&mut self, proto: Rc<Proto>, upvals: Vec<Value>) -> Value {
+        debug_assert_eq!(
+            upvals.len(),
+            proto.upvals.len(),
+            "a closure must capture exactly what its prototype's descriptor table declares"
+        );
+        self.alloc(Closure::new(proto, upvals))
     }
 
     /// Allocate a record instance of `rtype`.
@@ -573,9 +591,7 @@ unsafe fn trace_object(p: *mut GcHeader, tracer: &mut Tracer<'_>) {
             HeapTag::Bignum => (*p.cast::<Bignum>()).trace_fields(tracer),
             HeapTag::Record => (*p.cast::<Record>()).trace_fields(tracer),
             HeapTag::RecordType => (*p.cast::<RecordType>()).trace_fields(tracer),
-            // No allocator exists for closures until `Proto` lands in M2, so no closure can
-            // be on the heap to reach.
-            HeapTag::Closure => debug_assert!(false, "closures are not allocatable until M2"),
+            HeapTag::Closure => (*p.cast::<Closure>()).trace_fields(tracer),
         }
     }
 }
@@ -607,7 +623,7 @@ unsafe fn drop_object(p: *mut GcHeader) {
             HeapTag::Bignum => drop_as::<Bignum>(p),
             HeapTag::Record => drop_as::<Record>(p),
             HeapTag::RecordType => drop_as::<RecordType>(p),
-            HeapTag::Closure => debug_assert!(false, "closures are not allocatable until M2"),
+            HeapTag::Closure => drop_as::<Closure>(p),
         }
     }
 }
@@ -643,10 +659,7 @@ unsafe fn object_bytes(p: *mut GcHeader) -> usize {
             HeapTag::Bignum => size_as::<Bignum>(p),
             HeapTag::Record => size_as::<Record>(p),
             HeapTag::RecordType => size_as::<RecordType>(p),
-            HeapTag::Closure => {
-                debug_assert!(false, "closures are not allocatable until M2");
-                0
-            }
+            HeapTag::Closure => size_as::<Closure>(p),
         }
     }
 }
@@ -1031,6 +1044,49 @@ mod tests {
         assert_eq!(heap.collect(&()).freed, CELLS);
     }
 
+    /// Marking a prototype tree must not recurse per level: `Heap::closure` accepts any
+    /// `Rc<Proto>`, and a hand-assembled chain can be deeper than any stack. The mid-mark
+    /// heap is the worst place to find that out, which is why `Proto::trace_values` is
+    /// worklist-driven like the rest of the collector.
+    #[test]
+    fn a_very_deep_prototype_chain_marks_without_recursing() {
+        // Miri interprets every allocation; a few hundred levels exercise the same
+        // worklist path. The depth claim is what the native run establishes.
+        const DEPTH: usize = if cfg!(miri) { 200 } else { 60_000 };
+
+        let mut heap = Heap::new();
+        let leaf_const = heap.string("leaf");
+        let mut proto = Rc::new(Proto {
+            consts: vec![leaf_const],
+            ..Proto::default()
+        });
+        for _ in 1..DEPTH {
+            proto = Rc::new(Proto {
+                protos: vec![proto],
+                ..Proto::default()
+            });
+        }
+
+        let f = heap.closure(Rc::clone(&proto), vec![]);
+        let stats = heap.collect(&Roots(vec![f]));
+        assert_eq!(stats.freed, 0);
+        assert!(heap.contains(leaf_const), "marking must reach the leaf");
+
+        // Free the closure; the local `proto` still owns the chain, so the sweep's drop
+        // of the closure's `Rc` stays shallow.
+        assert_eq!(heap.collect(&()).freed, 2);
+        assert_eq!(heap.live_objects(), 0);
+
+        // Dismantle layer by layer. Dropping the whole chain at once would recurse in
+        // `Rc`'s drop glue — the one depth limit `Proto` documents as remaining.
+        while let Ok(mut p) = Rc::try_unwrap(proto) {
+            match p.protos.pop() {
+                Some(child) => proto = child,
+                None => break,
+            }
+        }
+    }
+
     #[test]
     fn integers_promote_and_demote_at_the_fixnum_boundary() {
         let mut heap = Heap::new();
@@ -1073,6 +1129,76 @@ mod tests {
         heap.collect(&());
         assert_eq!(heap.bytes_allocated(), 0);
         assert_eq!(heap.live_objects(), 0);
+    }
+
+    /// A closure is the root through which a prototype's constants stay alive: nothing
+    /// else in the heap knows the `Proto` exists.
+    #[test]
+    fn closures_trace_their_upvalues_and_their_prototype_tree() {
+        let mut heap = Heap::new();
+
+        let in_child_consts = heap.string("child const");
+        let in_parent_consts = heap.string("parent const");
+        let captured = heap.upvalue_cell(Value::fixnum(1).unwrap());
+
+        let child = Rc::new(Proto {
+            consts: vec![in_child_consts],
+            ..Proto::default()
+        });
+        let proto = Rc::new(Proto {
+            consts: vec![in_parent_consts],
+            protos: vec![child],
+            upvals: vec![crate::bytecode::UpvalDesc::ParentLocal(0)],
+            max_window: 1,
+            ..Proto::default()
+        });
+
+        let f = heap.closure(Rc::clone(&proto), vec![captured]);
+        assert_eq!(heap.tag_of(f), Some(HeapTag::Closure));
+
+        // Only the closure is rooted; everything else must be reached through it.
+        let stats = heap.collect(&Roots(vec![f]));
+        assert_eq!(stats.freed, 0);
+        assert!(heap.contains(in_child_consts));
+        assert!(heap.contains(in_parent_consts));
+        assert!(heap.contains(captured));
+
+        let clos = heap.get::<Closure>(f).unwrap();
+        assert_eq!(clos.upvals, vec![captured]);
+        assert!(Rc::ptr_eq(&clos.proto, &proto));
+
+        // Unrooted, the closure and everything it alone reached is freed — and the
+        // prototype survives on its own `Rc`, untouched by the collector.
+        assert_eq!(heap.collect(&()).freed, 4);
+        assert_eq!(heap.live_objects(), 0);
+        assert_eq!(proto.consts.len(), 1);
+    }
+
+    /// Two closures over one prototype share it; dropping one must not free the other's
+    /// code, and marking both must terminate despite tracing the same tree twice.
+    #[test]
+    fn closures_share_a_prototype_by_reference_count() {
+        let mut heap = Heap::new();
+
+        let konst = heap.string("shared");
+        let proto = Rc::new(Proto {
+            consts: vec![konst],
+            ..Proto::default()
+        });
+
+        let f = heap.closure(Rc::clone(&proto), vec![]);
+        let g = heap.closure(Rc::clone(&proto), vec![]);
+        assert_eq!(Rc::strong_count(&proto), 3);
+
+        // f dies, g lives: the prototype and its constant must survive.
+        let stats = heap.collect(&Roots(vec![g]));
+        assert_eq!(stats.freed, 1);
+        assert!(heap.contains(konst));
+        assert_eq!(Rc::strong_count(&proto), 2);
+
+        heap.collect(&());
+        assert_eq!(Rc::strong_count(&proto), 1);
+        let _ = f;
     }
 
     #[test]

@@ -11,6 +11,11 @@ num-traits = "0.2"
 rustyline = "18"
 thiserror = "2"
 
+[dev-dependencies]
+# Disassembly is tested as snapshot text, never as raw bytes, so the opcode byte table
+# stays cheap to renumber (frozen decision; see docs/project_plan.org).
+insta = "1"
+
 # Unsafe is denied for the whole package and re-enabled, file by file, only where it is
 # unavoidable: `src/gc/mod.rs` (the collector), `src/gc/trace.rs` (the grey worklist),
 # `src/value/object.rs` (trait declarations only) and `tests/gc_drop.rs`. Adding an unsafe

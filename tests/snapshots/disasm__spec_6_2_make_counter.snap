@@ -1,0 +1,16 @@
+---
+source: tests/disasm.rs
+expression: "disassemble(&heap, &proto)"
+---
+; proto make-counter: nparams=0 has_rest=false window=2 consts=0 upvals=0 protos=1
+0000  LOADI       r0, 0
+0001  CLOSURE     r1, p0
+0002  CLOSEUPVALS r0
+0003  RETURN1     r1
+
+; proto make-counter.p0: nparams=0 has_rest=false window=1 consts=0 upvals=1 protos=0
+;   u0 <- parent local r0
+0000  GETUPVAL    r0, u0
+0001  ADDI        r0, r0, 1
+0002  SETUPVAL    r0, u0                ; u0 := r0
+0003  RETURN1     r0

@@ -25,23 +25,29 @@ Verified against the working tree, not against the roadmap's own claims.
 
 - =src/lexer.rs= (752 loc), =src/parser.rs= (576), =src/ast.rs= (184), =src/span.rs= (130) —
   a span-carrying reader with miette diagnostics.
-- =src/value/= — the NaN-boxed ~Value~, the ~repr(C)~ heap objects, and =layout.rs=, the
-  single home for every mask, tag and field offset (M1).
+- =src/value/= — the NaN-boxed ~Value~, the ~repr(C)~ heap objects (now including
+  ~Closure~), and =layout.rs=, the single home for every mask, tag and field offset (M1).
 - =src/gc/= — the precise non-moving mark-sweep ~Heap~, the ~Trace~ root trait, and the pin
   shadow stack for native temporaries (M1).
+- =src/bytecode/= — the RBC-1 layer (M2): ~Insn~ with spec §3.1 accessors and symmetric
+  encoders, the frozen 50-opcode ~Op~ table, ~Proto~ with ~UpvalDesc~ capture tables, and
+  the load-time verifier.
+- =src/disasm.rs= — the disassembler; its text is the frozen test surface, snapshot-locked
+  by =tests/disasm.rs=.
 - =src/repl.rs= — a parse-only REPL. =src/cli.rs= — clap args.
 - =src/vm.rs= — a doc comment and nothing else.
 - =tests/gc_drop.rs= — a counting ~#[global_allocator]~ proving sweep runs ~Drop~.
 - =tests/r7rs_suite/r7rs.scm= — 2518 lines from chibi-scheme, unwired.
-- =ruse-bytecode-spec.md= — RBC-1 drafted, with its known internal inconsistencies
-  already resolved by the frozen decisions.
+- =ruse-bytecode-spec.md= — RBC-1, amended in M2 to match the frozen decisions (50 opcodes,
+  normative §5 byte table, layout-ordinal ~LOADIMM~, ~UpvalDesc~ capture, derived §6
+  listings).
 
 ** What does not exist
 
-The reader and the runtime foundation exist but nothing joins them: no instruction
-encoding, no VM, no compiler, no numeric tower beyond the fixnum/bignum boundary, no macro
-expander, no standard library, no ports, no conformance driver. The reader plus M1 is
-roughly 10% of the work by volume and rather less than that by difficulty.
+Nothing executes yet: no VM dispatch loop, no compiler, no numeric tower beyond the
+fixnum/bignum boundary, no macro expander, no standard library, no ports, no conformance
+driver. M3 is where the reader, the bytecode layer and the runtime first join into an
+end-to-end result.
 
 ** Two corrections to the recorded status, since fixed
 
@@ -238,20 +244,94 @@ three are fixed.
 - ~Str~ stores UTF-8, which makes ~string-ref~ O(n). Same trade chibi makes; revisit in M9 if
   conformance work shows it hurting.
 
-* TODO [#A] M2 — Encoding, decoder, ~Op~ enum, verifier, disassembler [/] :effort_M:
+* DONE [#A] M2 — Encoding, decoder, ~Op~ enum, verifier, disassembler [/] :effort_M:
+CLOSED: [2026-08-25 Tue]
 
 *Deps:* M1.
-*Exit:* hand-assembled ~Proto~ s round-trip encode→decode→disassemble as stable mnemonic
-text; the verifier rejects bad operands; the disassembler reproduces spec §6.1 factorial.
+*Exit met:* hand-assembled ~Proto~ s round-trip encode→decode→disassemble as stable
+mnemonic text — the round trip re-encodes every decoded field through the format
+constructors and demands the identical program; the verifier rejects bad operands
+(twenty-two error kinds, each unit-tested); and the disassembler reproduces the
+*derived* spec §6.1 factorial, plus §6.2 ~make-counter~ and §6.3 call/cc, as ~insta~
+snapshots. 120 tests and 9 doctests green under ~cargo nextest run --all-targets~ /
+~cargo test --doc~, clippy ~-D warnings~ and fmt clean, ~nix build~ green with the one
+new dev-dependency (~insta~), and Miri green under both aliasing models — the new
+~Closure~ arms are lib-tested, so the gating Miri job covers them.
 
-- [ ] ~Insn(u32)~ accessors (spec §3.1) plus symmetric encoder constructors
-- [ ] ~Op~ enum (~repr(u8)~), 50 opcodes, =0x40=–=0x45= reserved
-- [ ] Encode-side ~Proto~: code, constant pool as ~Value~ s, upvals, child protos, arity,
-      max window, line table. ~UpvalDesc~ = ParentLocal | ParentUpval
-- [ ] Load-time verifier: operand ranges, window ≤ 250, in-bounds indices
-- [ ] =src/disasm.rs=; ~insta~ snapshots of disassembly text, never raw bytes
-- [ ] Spec §6 worked examples are schematic and internally inconsistent — derive the
-      correct encodings rather than transcribing them
+- [X] ~Insn(u32)~ accessors (spec §3.1) plus symmetric encoder constructors
+      (~iabc~/~iabx~/~iasbx~/~iax~; wrong-format or oversized-Ax encodes fail loudly,
+      release builds included, because the mistake would otherwise be a well-formed word
+      the verifier cannot distinguish from intent)
+- [X] ~Op~ enum (~repr(u8)~), 50 opcodes, =0x40=–=0x45= reserved. The discriminants *are*
+      the byte table — spec §5's grouped layout adopted verbatim and now normative — and
+      an independent 50-entry test restates the whole assignment so a renumbering has to
+      edit the test deliberately
+- [X] Encode-side ~Proto~: code, constant pool as ~Value~ s, upvals, child protos, arity,
+      max window, line table. ~UpvalDesc~ = ParentLocal | ParentUpval, carried in the
+      *child* prototype (Lua 5.4's pattern) — no pseudo-instructions after ~CLOSURE~
+- [X] Load-time verifier: operand ranges (compound ~A+B-1~ blocks included), window ≤
+      250, in-bounds indices, LOADKX/EXTRAARG pairing, no control transfer onto an
+      EXTRAARG, no fall-off-the-end, canonical zero for unused fields, span-table length
+- [X] =src/disasm.rs=; ~insta~ snapshots of disassembly text, never raw bytes
+- [X] Spec §6 worked examples are schematic and internally inconsistent — derived the
+      correct encodings and amended the spec's listings to the disassembler's own
+      verified output
+
+** What M2 froze beyond the checklist
+
+- The skip-family ~k~ flag always lives in field *C*, ~TEST~ included; the disassembly
+  spells the direction out (~skip if (= r0 r2)~ vs ~skip unless …~) so a polarity
+  regression is a snapshot diff, not an unchanged digit.
+- Unused operand fields must encode as zero: every instruction has exactly one canonical
+  encoding, verifier-enforced. ~RETURN B=1~ therefore requires ~A=0~; ~APPLY B=1~ is
+  rejected outright (no list to spread).
+- ~RAISE~ is not a terminator — ~raise-continuable~ returns to the next instruction, so
+  the compiler must close every code path with RETURN/RETURN1/TAILCALL/JMP.
+- ~LOADIMM~'s operand is the =layout.rs= singleton ordinal (see the resolved open
+  question below). ~CADR~'s path byte and ~TYPEP~'s selector stay deliberately unfrozen
+  (open questions 1–2); the verifier passes their C through.
+- Disassembly labels prototypes by tree path (~fact~, ~make-counter.p0~), never by their
+  own name — compilers name every ~named let~ body ~loop~, so names cannot locate a
+  prototype; the name prints as an annotation.
+- The verifier's residual obligations are documented where M3 will look: ~JMPIDX~'s
+  computed target needs a runtime bounds *and* not-EXTRAARG check; global-key symbolness
+  is the slot linker's to check; ~PRIMCALL~'s index waits for the M3 native-fn table.
+- ~Proto.spans~ is the provisional line table (open question 5): per-instruction byte
+  spans, absent-or-parallel enforced by the verifier.
+- ~Closure~ landed with ~Proto~, replacing M1's three ~debug_assert!~ tag-dispatch arms;
+  ~Heap::closure~ asserts the capture arity against the descriptor table in debug builds.
+  ~Proto~ is ~Rc~-shared, not a heap object, and implements ~Trace~ (alongside a
+  forwarding ~Rc<T>~ impl in =src/gc/trace.rs=) so the M3 compiler and VM can root
+  in-flight prototypes before any closure exists.
+
+** What the adversarial review of the implementation found
+
+Six independent lenses over the finished code (spec-table conformance, verifier
+soundness, bit-level encoding, GC and the new ~Closure~, the §6 derivations, project
+conventions), the nine most severe of twenty-four distinct findings each handed to a
+skeptic tasked with refuting it. Eight were refuted — mostly claims against deliberate
+frozen behavior (open-ended ~B=0~/~C=0~ counts, ~GETLOCALN~'s reserved semantics) — and
+one was confirmed:
+
+1. *Confirmed, minor — the prototype-tree mark walk recursed.* ~Proto::trace_values~
+   recursed once per tree level in the middle of the mark phase, while both the ~Tracer~
+   and ~verify()~ are worklist-driven for exactly that reason; a 40k-deep chain built
+   through the safe public API passed ~verify~ and then aborted inside ~collect~.
+   Rewritten as a worklist, with a depth regression test. The residual, documented limit
+   is ~Rc~'s own drop glue (~100k uniquely-owned levels); an ~impl Drop~ flattening was
+   tried and rejected because a ~Drop~ type forfeits functional-record-update syntax,
+   which every ~Proto~ construction site uses.
+
+Of the fifteen unverified minor findings, the adopted ones: the span-table length rule;
+the full-table byte pin (the macro's own round-trip tests are tautologies — only an
+independent restatement can catch a renumbering); hard format asserts on the encoders;
+the ~Heap::closure~ arity assert; ~Trace~ for ~Proto~; path-based labels; out-of-bounds
+annotations for ~p~/~u~ operands; the skip-direction comments; and the ~HANDLERPUSH~
+doc's guard-only qualification. Declined, with the trade-off documented in place:
+charging a sole-owner closure for its prototype in ~extra_bytes~ (under-reporting only
+delays a collection; over-charging shared prototypes would inflate every trigger), and
+memoizing ~verify~/~trace~ across a shared-child DAG (no reachable input path — there is
+no bytecode deserializer, and the compiler emits trees).
 
 * TODO [#A] M3 — Walking skeleton: dispatch loop + core codegen [/]  :effort_XL:
 
@@ -485,8 +565,11 @@ postdates a working sequential VM. The spec's deferred flonum-specialized opcode
 - [ ] *~DIV~ policy* (spec open-Q 4): confirm the "divides evenly" fast path earns its
       branch, or whether ~DIV~ should always go to the runtime with ~QUOT~ carrying the
       fast integer path alone
-- [ ] *Line-info table format* (spec open-Q 5) — needed by ~error~ source locations
-      before the compiler is pleasant to debug
+- [X] *Line-info table format* (spec open-Q 5) — provisionally settled in M2:
+      ~Proto.spans~ is a per-instruction table of source *byte spans* (empty when debug
+      info is stripped), because the reader already produces byte spans and miette
+      consumes them directly; a compressed encoding can replace the representation behind
+      the field. Revisit only if M3's compiler shows it mattering at scale
 - [ ] *The safe-versus-unsafe heap-access contract* — decide before M3 writes its inner
       loop. ~Heap::get~/~get_mut~/~tag_of~ are safe functions whose real precondition is
       that the ~Value~ has not been swept; a ~Value~ is ~Copy~ and carries no lifetime, so
@@ -501,13 +584,11 @@ postdates a working sequential VM. The spec's deferred flonum-specialized opcode
       lifetime does *not* resolve it: a branded ~Value~ is still stale after a collection of
       its own heap, and the sound version is ~gc-arena~'s ~Gc<'gc, T>~, which is a redesign
       of the ~Copy~ NaN-boxed word
-- [ ] *~LOADIMM~ operand mapping* — =ruse-bytecode-spec.md= §4.1 lists the immediate
-      singletons as ~0=#f 1=#t 2='() 3=unspecified 4=eof 5=undefined~; =src/value/layout.rs=
-      assigns the opposite. No code is affected yet. ~SINGLETON_UNDEFINED~ must stay 0 —
-      that is pinned by the x86-64 indefinite-QNaN assertion, not by the boolean-adjacency
-      ones, which hold under either ordering. When the ~Op~ enum lands, define ~LOADIMM~'s
-      operand *as* the =layout.rs= ordinal and amend the spec to point at it, the same
-      treatment already applied to the spec's "56 opcodes" prose. Do not add a second table
+- [X] *~LOADIMM~ operand mapping* — resolved in M2 exactly as planned: ~LOADIMM~'s
+      operand *is* the =layout.rs= singleton ordinal (~0=undefined 1=unspecified 2='()
+      3=eof 4=#f 5=#t~), the spec's §4.1 row now points at =src/value/layout.rs= as the
+      single source, and no second table exists — the verifier and disassembler both key
+      off the layout constants
 - [ ] *Weak symbol interner*, before ~string->symbol~ lands (M6). Interned symbols are
       permanent roots today, so unbounded distinct names retain forever and lengthen every
       mark. Landing a weak interner now would be actively harmful — it makes ~Heap::symbol~'s

@@ -1,0 +1,11 @@
+---
+source: tests/disasm.rs
+expression: "disassemble(&heap, &proto)"
+---
+; proto broken: nparams=0 has_rest=false window=1 consts=0 upvals=0 protos=0
+0000  LOADK       r0, k9                ; k out of bounds
+0001  LOADKX      r0                    ; missing EXTRAARG
+0002  LOADIMM     r0, 9                 ; invalid singleton
+0003  JMP         +99                   ; -> out of bounds (103)
+0004  CLOSURE     r0, p4                ; p out of bounds
+0005  GETUPVAL    r0, u9                ; u out of bounds

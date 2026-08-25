@@ -1,0 +1,72 @@
+---
+source: tests/disasm.rs
+expression: "disassemble(&heap, &proto)"
+---
+; proto all-ops: nparams=0 has_rest=false window=3 consts=8 upvals=2 protos=1
+;   u0 <- parent local r0
+;   u1 <- parent upvalue u0
+0000  MOVE        r1, r0
+0001  LOADK       r0, k0                ; "hi\n"
+0002  LOADKX      r0                    ; k1 = 2.5
+0003  EXTRAARG    1
+0004  LOADIMM     r0, #f
+0005  LOADI       r0, -7
+0006  ADD         r2, r0, r1
+0007  SUB         r2, r0, r1
+0008  MUL         r2, r0, r1
+0009  DIV         r2, r0, r1
+0010  QUOT        r2, r0, r1
+0011  NEG         r1, r0
+0012  ADDI        r1, r0, -1
+0013  NUMEQ       r0, r1, 1             ; skip unless (= r0 r1)
+0014  NUMLT       r0, r1, 0             ; skip if (< r0 r1)
+0015  NUMLE       r0, r1, 1             ; skip unless (<= r0 r1)
+0016  EQ          r0, r1, 0             ; skip if (eq? r0 r1)
+0017  EQV         r0, r1, 1             ; skip unless (eqv? r0 r1)
+0018  TEST        r0, 1                 ; skip unless r0
+0019  JMP         +2                    ; -> 0022
+0020  JMP         -3, close>=r1         ; -> 0018
+0021  JMPIDX      r0, r1, r2
+0022  CONS        r2, r0, r1
+0023  CAR         r1, r0
+0024  CDR         r1, r0
+0025  SETCAR      r0, r1
+0026  SETCDR      r0, r1
+0027  CADR        r1, r0, 6
+0028  TYPEP       r0, 3                 ; skip unless type 3
+0029  CALL        r0, 0, 0              ; varargs, all results
+0030  CALL        r0, 3, 2              ; 2 args, 1 result
+0031  TAILCALL    r0, 1                 ; 0 args
+0032  RETURN      r0, 0                 ; all values from r0
+0033  RETURN      r0, 1                 ; no values
+0034  RETURN      r0, 3                 ; 2 values
+0035  RETURN1     r0
+0036  APPLY       r0, 3                 ; 2 args, last spread
+0037  CLOSURE     r0, p0                ; kid
+0038  GETUPVAL    r0, u1
+0039  SETUPVAL    r0, u1                ; u1 := r0
+0040  GETGLOBAL   r0, k2                ; foo
+0041  SETGLOBAL   r0, k2                ; foo
+0042  GETLOCALN   r1, r0
+0043  CLOSEUPVALS r1
+0044  VECREF      r2, r0, r1
+0045  VECSET      r0, r1, r2
+0046  NEWVEC      r2, r0, r1
+0047  PRIMCALL    r0, 2, 7              ; prim 7, 1 arg
+0048  CAPTURECC   r2
+0049  WINDPUSH    r0, r1
+0050  WINDPOP
+0051  HANDLERPUSH r0, +3                ; -> 0055
+0052  HANDLERPOP
+0053  RAISE       r0, 1                 ; continuable
+0054  RAISE       r0, 0
+0055  LOADK       r0, k3                ; #\λ
+0056  LOADK       r0, k4                ; 9223372036854775807
+0057  LOADK       r0, k5                ; #<pair>
+0058  LOADK       r0, k6                ; #t
+0059  LOADK       r0, k7                ; -3
+0060  INVALID     0x1e                  ; raw 0x0000001e
+0061  INVALID     0x40                  ; raw 0x02010040
+
+; proto all-ops.p0 (kid): nparams=0 has_rest=false window=1 consts=0 upvals=0 protos=0
+0000  RETURN1     r0
