@@ -26,28 +26,40 @@ Verified against the working tree, not against the roadmap's own claims.
 - =src/lexer.rs= (752 loc), =src/parser.rs= (576), =src/ast.rs= (184), =src/span.rs= (130) —
   a span-carrying reader with miette diagnostics.
 - =src/value/= — the NaN-boxed ~Value~, the ~repr(C)~ heap objects (now including
-  ~Closure~), and =layout.rs=, the single home for every mask, tag and field offset (M1).
-- =src/gc/= — the precise non-moving mark-sweep ~Heap~, the ~Trace~ root trait, and the pin
+  ~Closure~ and ~NativeProc~), and =layout.rs=, the single home for every mask, tag and
+  field offset (M1, extended in M3).
+- =src/gc/= — the precise non-moving mark-sweep ~Heap~ (whose ~collect~ is now
+  ~unsafe fn~ — see the resolved open question), the ~Trace~ root trait, and the pin
   shadow stack for native temporaries (M1).
 - =src/bytecode/= — the RBC-1 layer (M2): ~Insn~ with spec §3.1 accessors and symmetric
   encoders, the frozen 50-opcode ~Op~ table, ~Proto~ with ~UpvalDesc~ capture tables, and
   the load-time verifier.
+- =src/vm/= — the M3 register VM: the flat register file, ~Frame~ stack and dispatch
+  loop, the append-only ~Globals~ slot table, the one GC safepoint with the VM state as
+  root set, and typed ~VmError~ s throughout.
+- =src/rt/= — opcode and primitive semantics as standalone functions (habit 2): the M3
+  numeric slice, pairs, vectors, ~eqv?~/~equal?~, the ~display~/~write~ printer, and the
+  ~PRIMCALL~ native-function table with ~35 primitives, each also a global.
+- =src/compiler/= — decision C's two passes: ~Expr~ → typed Core IR (syntax, keyword
+  shadowing) and destination-register + tail-flag codegen over a Lua-style ~Func~
+  allocator, with licensed primitive inlining and the ~ADDI~ peephole.
 - =src/disasm.rs= — the disassembler; its text is the frozen test surface, snapshot-locked
-  by =tests/disasm.rs=.
-- =src/repl.rs= — a parse-only REPL. =src/cli.rs= — clap args.
-- =src/vm.rs= — a doc comment and nothing else.
+  by =tests/disasm.rs= and now also by =tests/compile.rs= for compiler output.
+- =src/repl.rs= — a real read–eval–print loop. =src/main.rs= — REPL or file evaluation.
 - =tests/gc_drop.rs= — a counting ~#[global_allocator]~ proving sweep runs ~Drop~.
-- =tests/r7rs_suite/r7rs.scm= — 2518 lines from chibi-scheme, unwired.
+- =tests/eval.rs= — the M3 exit criteria as end-to-end tests.
+- =tests/r7rs_progress.rs= — the incremental conformance driver over
+  =tests/r7rs_suite/r7rs.scm=, gating on a ratcheting passing-test floor.
 - =ruse-bytecode-spec.md= — RBC-1, amended in M2 to match the frozen decisions (50 opcodes,
   normative §5 byte table, layout-ordinal ~LOADIMM~, ~UpvalDesc~ capture, derived §6
   listings).
 
 ** What does not exist
 
-Nothing executes yet: no VM dispatch loop, no compiler, no numeric tower beyond the
-fixnum/bignum boundary, no macro expander, no standard library, no ports, no conformance
-driver. M3 is where the reader, the bytecode layer and the runtime first join into an
-end-to-end result.
+Closures capture nothing yet (upvalues are M4), and there are no derived forms, no
+numeric tower beyond the M3 fixnum/bignum/flonum slice, no macro expander, no ports, no
+first-class control, and only the minimal stdlib. Every opcode owned by a later
+milestone executes as a typed ~Unimplemented~ error rather than ~unreachable!~.
 
 ** Two corrections to the recorded status, since fixed
 
@@ -333,33 +345,116 @@ delays a collection; over-charging shared prototypes would inflate every trigger
 memoizing ~verify~/~trace~ across a shared-child DAG (no reachable input path — there is
 no bytecode deserializer, and the compiler emits trees).
 
-* TODO [#A] M3 — Walking skeleton: dispatch loop + core codegen [/]  :effort_XL:
+* DONE [#A] M3 — Walking skeleton: dispatch loop + core codegen [/]  :effort_XL:
+CLOSED: [2026-08-25 Tue]
 
 *Deps:* M1, M2.
-*Exit:* tail-recursive ~fact~ runs to the right result in *constant* frame depth; simple
-arithmetic/list/~define~ programs print; the first non-zero =r7rs.scm= slice passes.
+*Exit met:* tail recursion runs in *constant* frame depth — a million-iteration loop
+completes under a frame limit of 50, which only genuine ~TAILCALL~ frame reuse can pass —
+and ~(fact 20)~ promotes through the fixnum boundary to the right bignum. Arithmetic,
+list, ~define~ and ~display~ programs evaluate end-to-end through the REPL and the file
+runner. The first =r7rs.scm= slice passes: the incremental driver splits the suite into
+1180 top-level forms, evaluates the 168 the M3 slice can express, and the suite's own
+~(test …)~ harness — running as a Scheme shim on ruse itself — reports *115 passing
+tests*, ratcheted as the driver's gating floor. (Two suite tests fail rather than skip,
+both collateral of first-class control not existing until M7; documented in the driver.)
+192 tests and 9 doctests green under ~cargo nextest run --all-targets~ / ~cargo test
+--doc~, clippy ~-D warnings~ and fmt clean, ~nix build~ green with one new dependency
+(~fs-err~), and Miri green under both aliasing models — the VM's safepoint and its root
+set are lib-tested, so the gating Miri job interprets a real collection mid-execution.
 
-The single most important milestone. It is the first end-to-end result and it fixes the
-shape everything after it is written against.
-
-- [ ] VM: flat per-fiber register file (~Vec<Value>~), ~Frame~ stack, ~match~-on-~u8~
+- [X] VM: flat per-fiber register file (~Vec<Value>~), ~Frame~ stack, ~match~-on-~u8~
       dispatch, usize-index addressing (never hold a ~&mut~ slice across a nested call)
-- [ ] =src/rt/= — each opcode's semantics as a standalone, separately-testable function;
+- [X] =src/rt/= — each opcode's semantics as a standalone, separately-testable function;
       dispatch arms decode operands and call into it
-- [ ] Opcode subset: MOVE, LOADI/LOADK/LOADIMM, GET/SETGLOBAL, ADD/SUB/MUL fixnum-fast,
+- [X] Opcode subset: MOVE, LOADI/LOADK/LOADIMM, GET/SETGLOBAL, ADD/SUB/MUL fixnum-fast,
       NUMEQ/NUMLT/NUMLE, EQ/EQV, TEST, JMP, CALL/TAILCALL/RETURN/RETURN1, CLOSURE
-      (no captures yet), PRIMCALL
-- [ ] Global slots: append-only, stable-address vector, with unbound detection
-- [ ] Every error path is a typed ~VmError~ ~Result~ — no ~unwrap~/~unreachable~, per the
+      (no captures yet), PRIMCALL — plus the pair and vector groups, whose ~rt~
+      functions the natives needed anyway
+- [X] Global slots: append-only, stable-address vector, with unbound detection
+- [X] Every error path is a typed ~VmError~ ~Result~ — no ~unwrap~/~unreachable~, per the
       lint wall
-- [ ] Compiler: Core IR, special-form classification (define/lambda/if/quote/set!/begin/
+- [X] Compiler: Core IR, special-form classification (define/lambda/if/quote/set!/begin/
       let), lexical addressing, Lua ~FuncState~ allocation, tail-position propagation,
       fixed-arity lambda → child ~Proto~ + CLOSURE, ~ADDI~ peephole
-- [ ] Minimal ~display~/~write~/~newline~, ~cons~/~car~/~cdr~/~eq?~, and a non-cyclic
+- [X] Minimal ~display~/~write~/~newline~, ~cons~/~car~/~cdr~/~eq?~, and a non-cyclic
       ~equal?~ (the ~(test …)~ shim compares with it)
-- [ ] ~eval_str~ wiring read→compile→run→write; =main.rs= file path replaces the TODO
-- [ ] The ~(chibi test)~ shim and an error-tolerant incremental conformance driver
+- [X] ~eval_str~ wiring read→compile→run→write; =main.rs= file path replaces the TODO
+- [X] The ~(chibi test)~ shim and an error-tolerant incremental conformance driver
       (skip on unbound identifier) reporting a passing-form tally
+
+** What M3 settled beyond the checklist
+
+- *The safe-versus-unsafe heap contract is resolved* (the open question below): ~Heap::collect~
+  is ~pub unsafe fn~, the ~Vec::set_len~ shape — the invalidating operation carries the
+  obligation. The interpreter pays exactly one ~unsafe~ block, at the dispatch loop's
+  safepoint in =src/vm/roots.rs=, which joins the unsafe budget as its fifth file. The
+  debug-build ~LiveSet~ registry stays as the backstop.
+- *Native procedures are a heap object*: ~NativeProc~ (tag 10, additive — decision F
+  plans the same for ~Continuation~) names an entry in a per-VM ~PrimTable~ that owns the
+  function pointer and arity. ~CALL~/~TAILCALL~ invoke natives framelessly; ~PRIMCALL C~
+  indexes the same table; every primitive is also a global (decision G), which is what
+  makes ~((if #f + *) 3 4)~ work. Table order is deliberately unfrozen while nothing
+  serializes bytecode.
+- *Primitive inlining is licensed, not assumed*: a name compiles to its opcode or
+  ~PRIMCALL~ only while lexically unbound *and* still the pristine boot binding
+  (~Globals::is_pristine_builtin~). Redefinition revokes the licence for later-compiled
+  forms, and ~Vm::eval_expr~ splices a top-level ~begin~ into separate compilation units
+  so the revocation sequences *inside* one (R7RS §5.1) — snapshot-pinned both ways.
+- *Register windows are complete root sets by construction*: every frame's window is
+  cleared to ~undefined~ at entry, so the safepoint's root walk traces whole windows
+  blindly; stale words from popped frames sit only above every live window. Natives run
+  entirely between safepoints and cannot trigger one.
+- *Mixed-exactness comparisons are exact* — a small piece of M5 pulled forward because
+  the suite gates on it: ~(= 9007199254740992.0 9007199254740993)~ is ~#f~ because the
+  flonum is split into exact integral part and fraction rather than the exact operand
+  being rounded through ~f64~. Arithmetic stays contagiously inexact, as R7RS asks.
+- *Embedder ~Value~ lifetimes are a documented contract with a real escape hatch*:
+  values from ~global~/~execute~/~eval_*~ are valid until the next evaluation;
+  ~Vm::pins~ exposes the pin stack for holding one longer; ~compile_only~ retains its
+  most recent prototype as a root so compile-now-run-later survives intervening
+  collections.
+- Trust-boundary failures are typed as such: a non-symbol global key or an unknown
+  native index is ~Rejected~/~UnknownNative~, never ~Internal~ — ~Internal~ is reserved
+  for genuine ruse bugs and says so.
+
+** What the adversarial review of the implementation found
+
+Six independent lenses over the finished code (GC/rooting soundness, calling convention
+and frames, compiler correctness, R7RS semantics of the slice, verifier/dispatch trust
+alignment, project conventions), thirteen distinct findings, the eight most severe each
+handed to a skeptic tasked with refuting it. Two were refuted, six confirmed — and all
+six are fixed:
+
+1. *Blocker — ~compile_only~'s prototype was rooted by nothing.* Its constant pool
+   (quoted data) lived on the heap with no root until a frame held it, so an intervening
+   evaluation's collection freed it; the skeptic *reproduced* silent wrong data through
+   the safe public API — worse than the expected debug panic, because the freed block
+   gets recycled and the ~LiveSet~ backstop passes. Fixed: the VM retains the most
+   recent compilation as a root (~VmState::compiled~, traced), with the contract
+   documented; ~compile~'s bare re-export was dropped from the crate root and the
+   remaining path documents the hazard.
+2. *Blocker — ~Vm::global~/~heap_mut~ handed out values with no lifetime contract*, and
+   the safepoint's SAFETY comment overclaimed ("no Rust local anywhere") for values an
+   embedder holds. Fixed: contracts documented on every handing-out API, the SAFETY
+   comment scoped to VM-internal state, and ~Vm::pins~ added as the supported way to
+   root a value across evaluations.
+3. *Major — a top-level ~begin~ did not sequence the inlining licence*:
+   ~(begin (define + -) (+ 3 4))~ compiled as one unit answered 7. Fixed by splicing
+   top-level ~begin~ in ~eval_expr~ (which is also the more literal reading of §5.1);
+   the lowering path's comment now states the residual one-unit behaviour honestly.
+4. *Minor — identity seeding lost the sign of zero*: ~(+ -0.0)~ answered ~0.0~ through
+   the native fold (IEEE: adding exact 0 normalizes the sign) and inconsistently with
+   the inlined path. Fixed: the natives fold from their first argument with an explicit
+   number check, and the compiler no longer inlines unary ~+~/~*~.
+5. & 6. *Minor — two trust-boundary failures misreported as ~Internal~* ("a ruse bug"):
+   a non-symbol ~GETGLOBAL~ key and an out-of-range native index, both reachable with
+   hand-assembled input the verifier deliberately leaves to the VM. Fixed as ~Rejected~
+   and a new ~UnknownNative~ kind.
+
+Adopted from the triage's dropped-as-duplicate pile: ~singleton_ordinal~ in the emitter
+was a positional second copy of the ~LOADIMM~ ordinal table; both it and the VM's mirror
+now pair each constant with its own =layout.rs= ordinal, so there is no order to drift.
 
 * TODO [#B] M4 — Closures, upvalues, binding and derived forms [/]    :effort_L:
 
@@ -558,7 +653,14 @@ postdates a working sequential VM. The spec's deferred flonum-specialized opcode
       with import-as-aliasing, versus per-library namespaces. Constrains ~GETGLOBAL~
       resolution and REPL retroactive redefinition (§5.4)
 - [ ] *~PRIMCALL~ conventions* beyond 256 entries (the globals-as-procedures fallback),
-      and the variadic and multiple-value calling conventions the spec leaves unspecified
+      and the variadic and multiple-value calling conventions the spec leaves unspecified.
+      /Partially shaped in M3:/ the table is per-VM (~PrimTable~), natives are plain
+      ~fn(&mut NativeCtx, &[Value]) -> Result<Value, VmError>~ receiving their arguments
+      as a flat slice (variadic included), and the beyond-256 fallback already works —
+      every primitive is a ~NativeProc~ global with a ~u32~ index that ~CALL~ invokes
+      framelessly, so ~PRIMCALL~'s byte only limits the *compiler's* direct emission.
+      Still open: the multiple-value convention (M7) and freezing table order, which
+      only matters once bytecode serializes
 - [ ] *Non-R7RS extensions*: keep ~[ ]~ bracket lists and the ~#!eof~/~#!default~
       singletons, or drop them? Commit to exact complex (R7RS permits omitting it, but
       the suite tests it)?
@@ -570,20 +672,19 @@ postdates a working sequential VM. The spec's deferred flonum-specialized opcode
       info is stripped), because the reader already produces byte spans and miette
       consumes them directly; a compressed encoding can replace the representation behind
       the field. Revisit only if M3's compiler shows it mattering at scale
-- [ ] *The safe-versus-unsafe heap-access contract* — decide before M3 writes its inner
-      loop. ~Heap::get~/~get_mut~/~tag_of~ are safe functions whose real precondition is
-      that the ~Value~ has not been swept; a ~Value~ is ~Copy~ and carries no lifetime, so
-      nothing enforces it. M1 ships a ~debug_assert!~ against a registry of owned addresses,
-      which catches it in tests and under Miri but not in release. The two candidate
-      resolutions: mark the *accessors* ~unsafe fn~ (coherent, but puts ~unsafe~ on every
-      field read in the dispatch loop, which desensitizes), or mark the *invalidating*
-      operation unsafe — ~pub unsafe fn collect~, contract "every ~Value~ live after this
-      returns must be reachable from ~roots~ or the pin stack" — which is the ~Vec::set_len~
-      shape and costs one ~unsafe~ block per safepoint, exactly where the root set genuinely
-      has to be complete. The second looks stronger. Branding ~Value~ with the heap's
-      lifetime does *not* resolve it: a branded ~Value~ is still stale after a collection of
-      its own heap, and the sound version is ~gc-arena~'s ~Gc<'gc, T>~, which is a redesign
-      of the ~Copy~ NaN-boxed word
+- [X] *The safe-versus-unsafe heap-access contract* — resolved in M3, taking the second
+      candidate as planned: the *invalidating* operation is unsafe. ~Heap::collect~ is
+      ~pub unsafe fn~ with the contract "every ~Value~ read after this returns must have
+      been reachable — at the moment of the call — from ~roots~, the interner, or the
+      pin stack"; the accessors stay safe. The interpreter pays exactly one ~unsafe~
+      block, at the dispatch loop's safepoint (=src/vm/roots.rs=, the unsafe budget's
+      fifth file), which is precisely where the root set genuinely has to be complete.
+      The M1 ~LiveSet~ ~debug_assert!~ registry stays as the backstop — the M3
+      adversarial review showed its limit (a recycled block satisfies it, so misuse can
+      corrupt silently even in debug), which is why the public API now also *documents*
+      value lifetimes (~Vm::global~/~execute~/~compile_only~) and exposes ~Vm::pins~ for
+      holding a value across evaluations. Branding ~Value~ with the heap's lifetime
+      remains rejected for the reasons recorded before
 - [X] *~LOADIMM~ operand mapping* — resolved in M2 exactly as planned: ~LOADIMM~'s
       operand *is* the =layout.rs= singleton ordinal (~0=undefined 1=unspecified 2='()
       3=eof 4=#f 5=#t~), the spec's §4.1 row now points at =src/value/layout.rs= as the

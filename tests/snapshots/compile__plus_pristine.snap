@@ -1,0 +1,8 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, \"(+ 10 1)\")"
+---
+; proto main: nparams=0 has_rest=false window=2 consts=0 upvals=0 protos=0
+0000  LOADI       r1, 10
+0001  ADDI        r0, r1, 1
+0002  RETURN1     r0

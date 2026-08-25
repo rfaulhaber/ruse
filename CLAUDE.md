@@ -9,7 +9,7 @@ Ruse is "Ryan's Useful Scheme Experiment" - a set of R7RS Scheme implementations
 ## Architecture
 
 Standard Cargo layout — sources live in `src/`:
-- `src/main.rs` - Binary entry point (`ruse` executable); dispatches to the REPL or (TODO) file evaluation
+- `src/main.rs` - Binary entry point (`ruse` executable); dispatches to the REPL or file evaluation
 - `src/lib.rs` - Library crate root; re-exports the public API
 - `src/lexer.rs` - Hand-written lexer producing `Token`s with byte spans
 - `src/parser.rs` - Recursive-descent `Parser`, producing the `Expr` AST
@@ -34,28 +34,58 @@ Standard Cargo layout — sources live in `src/`:
     protos, arity/window metadata, provisional span table), shared by `Rc`
   - `src/bytecode/verify.rs` - The load-time verifier; everything the VM will trust is
     checked here once
+- `src/vm/` - The register VM (M3)
+  - `src/vm/mod.rs` - `Vm`: the flat register file, `Frame` stack, `match`-dispatch loop,
+    calling convention (`CALL`/`TAILCALL`/`RETURN`), native invocation, and the
+    `eval_str`/`eval_expr`/`execute` public API
+  - `src/vm/error.rs` - `VmError`/`VmErrorKind` (typed, miette-rendering, span-carrying)
+    and the `RuseError` umbrella
+  - `src/vm/globals.rs` - `Globals`: the append-only stable-slot global table, plus the
+    pristine-builtin flag that licenses primitive inlining
+  - `src/vm/roots.rs` - The VM's `Trace` root set and its one safepoint — the sole caller
+    of the unsafe `Heap::collect`
+- `src/rt/` - Opcode and primitive semantics as standalone functions (habit 2: dispatch
+  arms decode operands and call in here; nothing semantic lives inline in the loop)
+  - `src/rt/arith.rs` - The M3 numeric slice (fixnum/bignum/flonum; M5 replaces the insides)
+  - `src/rt/pairs.rs`, `src/rt/vectors.rs` - Pair and vector opcode semantics
+  - `src/rt/equal.rs` - `eqv?` and the worklist-driven non-cyclic `equal?`
+  - `src/rt/write.rs` - The printer: `display`/`write` styles, worklist-driven
+  - `src/rt/prims.rs` - The `PRIMCALL` native-function table (`PrimTable`, `NativeCtx`)
+    and the M3 primitive set, each also installed as a `NativeProc` global
+- `src/compiler/` - The M3 compiler (decision C: no CPS, no ANF)
+  - `src/compiler/ir.rs` - Lowering `Expr` → typed Core IR; owns syntax, form arities, and
+    keyword shadowing (a lexical binding hides a special form)
+  - `src/compiler/emit.rs` - Destination-register + tail-flag codegen over a Lua-style
+    `Func` register allocator; primitive inlining, `ADDI` peephole, jump patching
 - `src/disasm.rs` - The disassembler; its text output is the frozen test surface for all
   bytecode (tests snapshot it and never assert on raw bytes)
 - `src/cli.rs` - clap-derived argument parser
-- `src/repl.rs` - Parse-only REPL (no evaluation yet)
-- `src/vm.rs` - Register-VM module (currently an empty placeholder)
+- `src/repl.rs` - The REPL: parse → eval → `write` each form's value
 - `tests/gc_drop.rs` - Global-allocator proof that sweeping runs `Drop`, not just `dealloc`
 - `tests/disasm.rs` - `insta` snapshots of the derived spec §6 compilations plus
   all-opcode and malformed-input listings (snapshots in `tests/snapshots/`)
-- `tests/r7rs_suite/r7rs.scm` - R7RS compliance test suite (not yet wired into the build)
+- `tests/compile.rs` - `insta` snapshots of *compiler* output, as disassembly text
+- `tests/eval.rs` - End-to-end tests: the M3 exit criteria in executable form (constant
+  frame-depth tail calls, bignum promotion, safepoint survival, typed errors)
+- `tests/r7rs_progress.rs` - The incremental, error-tolerant conformance driver over the
+  suite: splits top-level forms textually, evaluates what compiles, tallies a score
+- `tests/r7rs_suite/r7rs.scm` - R7RS compliance test suite (driven by `r7rs_progress`)
 - `ruse-bytecode-spec.md` - **RBC-1**, the target bytecode ISA (Lua-style register VM); the implementation goal
 - Project uses Nix flakes for the development environment
 
 ### Current status
 
-Reader, runtime foundation, and the bytecode layer (M0–M2 complete). The lexer and parser
-produce an `Expr` AST; `Value` and the collector exist underneath; the RBC-1 instruction
-encoding, the frozen 50-opcode table, `Proto`, the load-time verifier and the disassembler
-are in place, with the spec's §6 worked examples derived, verified and snapshot-frozen.
-Nothing executes yet: there is still no evaluator, bytecode compiler, VM, numeric tower,
-macro expander, or standard library — M3's dispatch loop and codegen are what first
-connect the reader to the runtime. The goal is a bytecode-compiled R7RS implementation
-targeting the register VM described in `ruse-bytecode-spec.md`.
+The walking skeleton runs (M0–M3): source text goes reader → compiler → verifier →
+dispatch loop → value, end to end. The M3 language slice is fixed-arity `lambda` (no
+captures yet), top-level `define`, `if`, `quote`, `set!`, `begin`, `let`, and ~35 native
+primitives; `TAILCALL` reuses frames, so tail recursion runs in constant space (tested
+under a 50-frame limit), fixnum overflow promotes to bignums, and collections happen only
+at the dispatch loop's safepoint with the frame windows as the root set. Still to come:
+closures/upvalues and derived forms (M4), the numeric tower (M5), reader breadth (M6),
+first-class control (M7), hygienic macros and libraries (M8), stdlib/ports/conformance
+(M9). Opcodes owned by those milestones execute as typed `Unimplemented` errors, never
+`unreachable!`. The goal is a bytecode-compiled R7RS implementation targeting the
+register VM described in `ruse-bytecode-spec.md`.
 
 ### Bytecode invariants (M2)
 
@@ -78,6 +108,41 @@ targeting the register VM described in `ruse-bytecode-spec.md`.
 - The verifier is the trust boundary: the M3 dispatch loop may assume any verified
   prototype's static operands are in bounds, but `JMPIDX`'s computed target is a runtime
   value and must be bounds-checked at execution time.
+
+### Execution invariants (M3)
+
+- **`Heap::collect` is `unsafe fn`** — the ratified answer to the safe-versus-unsafe
+  heap-access contract: the *invalidating* operation carries the obligation (the
+  `Vec::set_len` shape). The VM's one safepoint (`src/vm/roots.rs`) is its one caller
+  inside the interpreter; the contract is that every `Value` read afterwards was
+  reachable from the roots, the interner, or the pin stack at the moment of the call.
+- **Register windows are complete root sets by construction.** Every register in a
+  frame's `[base, base + max_window)` is cleared to `undefined` at frame entry, so the
+  root walk traces whole windows blindly; stale words from popped deeper frames sit only
+  above every live window, unreported and unread. Collections happen only at the
+  dispatch-loop safepoint; natives run entirely between safepoints and cannot trigger one.
+- **Opcode semantics live in `src/rt/`, not in match arms** (habit 2). Dispatch arms
+  decode operands, call one `rt::` function, and store the result — nothing more.
+- **The dispatch loop never holds a `&mut` slice across a call**: registers are read out
+  as `Copy` values by `usize` index and written back after the runtime call returns.
+- **Global access is one indirection** through `Globals`' append-only slot vector
+  (symbol → slot → value); `GETGLOBAL` never resolves to a direct address (R7RS §5.4).
+- **Primitive inlining is licensed, not assumed**: `(+ a b)` compiles to `ADD` (and
+  `display` to `PRIMCALL`) only while the name is lexically unbound *and* still the
+  pristine boot-time global (`Globals::is_pristine_builtin`). Redefinition revokes the
+  licence for every later-compiled form; snapshot `plus_redefined` pins this. So the
+  revocation sequences *inside* a top-level `begin` too (R7RS §5.1), `Vm::eval_expr`
+  splices one into separate compilation units before compiling.
+- **A `NativeProc` heap value names an entry in the per-VM `PrimTable`** — the table owns
+  the function pointer and arity, the object just points. `CALL`/`TAILCALL` invoke
+  natives framelessly; `PRIMCALL C` indexes the same table, with the index checked at
+  execution time (the verifier has no VM to check it against). Table order is not frozen
+  while nothing serializes bytecode.
+- **Errors are values**: every failure path in the VM, the runtime and the natives is a
+  typed `VmErrorKind` (spans attached from `Proto.spans` at the faulting instruction).
+  Milestone-future opcodes return `Unimplemented`; a broken VM invariant returns
+  `Internal` and says it is a ruse bug. No `unwrap`, no `unreachable!` — the lint wall
+  makes this a build property.
 
 ### Value and GC invariants (M1)
 
@@ -123,7 +188,7 @@ targeting the register VM described in `ruse-bytecode-spec.md`.
 
 ### Unsafe code and Miri
 
-`unsafe_code` is **denied for the whole package** in `Cargo.toml`. Four files opt out, and
+`unsafe_code` is **denied for the whole package** in `Cargo.toml`. Five files opt out, and
 adding an `unsafe` block anywhere else is a build error rather than a review question:
 
 | File | Why |
@@ -131,6 +196,7 @@ adding an `unsafe` block anywhere else is a build error rather than a review que
 | `src/gc/mod.rs` | the collector: raw pointers, tag dispatch, `Box::from_raw` on sweep |
 | `src/gc/trace.rs` | the grey worklist, and the `unsafe impl Trace` forwarding impls |
 | `src/value/object.rs` | declarations only — `unsafe impl HeapObject`, no unsafe operations |
+| `src/vm/roots.rs` | the VM's `unsafe impl Trace` root set, and the safepoint that calls the unsafe `Heap::collect` |
 | `tests/gc_drop.rs` | a `GlobalAlloc` implementation is unsafe by definition |
 
 `src/value/mod.rs`, `src/value/layout.rs` and `src/gc/handle.rs` contain no `unsafe` at all;
@@ -154,10 +220,10 @@ integer — so the code uses `expose_provenance`/`with_exposed_provenance_mut` r
 `as` casts, which keeps everything downstream of the cast checkable. `-Zmiri-permissive-provenance`
 silences the advisory; do not "fix" it by reaching for strict provenance.
 
-Two tests are Miri-aware: `a_very_long_list_marks_without_recursing` shrinks its list under
-`cfg!(miri)` (the full size would take hours interpreted), and the test that deliberately
-`mem::forget`s a pin scope is `#[cfg_attr(miri, ignore)]` because Miri's leak checker is
-correct to flag it.
+Several tests are Miri-aware: the long-list/deep-chain tests in `gc`, `rt::equal` and
+`rt::write` shrink their sizes under `cfg!(miri)` (the full sizes would take hours
+interpreted), and the test that deliberately `mem::forget`s a pin scope is
+`#[cfg_attr(miri, ignore)]` because Miri's leak checker is correct to flag it.
 
 ### Nix Integration
 - `nix develop` - Enter development shell with all dependencies
@@ -168,7 +234,9 @@ correct to flag it.
 
 The project targets the R7RS Scheme specification, compiled to the RBC-1 register
 bytecode VM in `ruse-bytecode-spec.md`. The suite in `tests/r7rs_suite/r7rs.scm` is the
-conformance target (not yet wired into the build; it is all-or-nothing as written).
+conformance target, driven incrementally by `tests/r7rs_progress.rs`: the driver splits
+the file into top-level forms textually (the lexer cannot read all of it yet), evaluates
+what compiles, skips what errors, and gates on the passing-test tally never going down.
 
 ### Roadmap & frozen decisions
 

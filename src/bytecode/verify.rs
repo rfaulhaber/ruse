@@ -28,8 +28,8 @@
 //! - `GETGLOBAL`/`SETGLOBAL` key constants are index-checked only. Whether `K[Bx]` is
 //!   actually a symbol needs the heap, which this pass deliberately does not take; the
 //!   global-slot linker resolves the key at load time and must reject a non-symbol there.
-//! - `PRIMCALL`'s C indexes the native-function table, an M3 artifact; until it exists
-//!   the index is unchecked.
+//! - `PRIMCALL`'s C indexes the native-function table, which is per-VM state this pass
+//!   never sees; the VM bounds-checks the index at execution time.
 
 use crate::bytecode::op::Op;
 use crate::bytecode::proto::{Proto, UpvalDesc};
@@ -511,8 +511,8 @@ fn verify_one(proto: &Proto, parent: Option<&Proto>, label: &str) -> Result<(), 
                 s.reg(rc)?;
             }
             Op::PrimCall => {
-                // C is the native-function index; the table it indexes is an M3 artifact,
-                // so it cannot be bounds-checked yet.
+                // C is the native-function index; the table it indexes is per-VM state
+                // this pass never sees, so the VM bounds-checks it at execution time.
                 s.arg_block(a, b)?;
             }
 

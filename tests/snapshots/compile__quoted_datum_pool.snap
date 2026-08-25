@@ -1,0 +1,7 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=1 consts=1 upvals=0 protos=0
+0000  LOADK       r0, k0                ; #<pair>
+0001  RETURN1     r0

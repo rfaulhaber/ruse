@@ -1,0 +1,13 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, \"(let ((if car) (car cdr)) (if (car '(1 2))))\")"
+---
+; proto main: nparams=0 has_rest=false window=7 consts=3 upvals=0 protos=0
+0000  GETGLOBAL   r1, k0                ; car
+0001  GETGLOBAL   r2, k1                ; cdr
+0002  MOVE        r3, r1
+0003  MOVE        r5, r2
+0004  LOADK       r6, k2                ; #<pair>
+0005  CALL        r5, 2, 2              ; 1 arg, 1 result
+0006  MOVE        r4, r5
+0007  TAILCALL    r3, 2                 ; 1 arg

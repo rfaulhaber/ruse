@@ -73,7 +73,9 @@ fn sweeping_and_dropping_the_heap_both_release_rust_side_storage() {
     );
 
     // Nothing roots any of it.
-    let stats = heap.collect(&());
+    // SAFETY: this is the test's one safepoint, and nothing rooted afterwards is
+    // dereferenced — the assertions that follow read process-allocator counters, not the heap.
+    let stats = unsafe { heap.collect(&()) };
     assert_eq!(stats.freed, COUNT * 3);
     assert_eq!(heap.live_objects(), 0);
 

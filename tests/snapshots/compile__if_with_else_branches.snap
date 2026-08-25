@@ -1,0 +1,15 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=3 consts=2 upvals=0 protos=0
+0000  LOADI       r1, 1
+0001  LOADI       r2, 2
+0002  NUMLT       r1, r2, 0             ; skip if (< r1 r2)
+0003  JMP         +3                    ; -> 0007
+0004  LOADK       r2, k0                ; "yes"
+0005  PRIMCALL    r1, 2, 32             ; prim 32, 1 arg
+0006  RETURN1     r1
+0007  LOADK       r2, k1                ; "no"
+0008  PRIMCALL    r1, 2, 32             ; prim 32, 1 arg
+0009  RETURN1     r1

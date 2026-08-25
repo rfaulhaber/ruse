@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+fs-err = "3"
 miette = { version = "7", features = ["fancy"] }
 num-bigint = "0.5"
 num-traits = "0.2"
@@ -18,8 +19,9 @@ insta = "1"
 
 # Unsafe is denied for the whole package and re-enabled, file by file, only where it is
 # unavoidable: `src/gc/mod.rs` (the collector), `src/gc/trace.rs` (the grey worklist),
-# `src/value/object.rs` (trait declarations only) and `tests/gc_drop.rs`. Adding an unsafe
-# block anywhere else is a build error rather than a review question.
+# `src/value/object.rs` (trait declarations only), `src/vm/roots.rs` (the VM's root set
+# and its safepoint — the one caller of the unsafe `Heap::collect`) and `tests/gc_drop.rs`.
+# Adding an unsafe block anywhere else is a build error rather than a review question.
 [lints.rust]
 unsafe_code = "deny"
 

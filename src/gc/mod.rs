@@ -36,8 +36,8 @@ use crate::bytecode::Proto;
 use crate::value::Value;
 use crate::value::layout::{Color, GcHeader, HeapTag};
 use crate::value::object::{
-    Bignum, Bytevector, Closure, HeapObject, Pair, Record, RecordType, Str, Symbol, UpvalueCell,
-    Vector, set_header,
+    Bignum, Bytevector, Closure, HeapObject, NativeProc, Pair, Record, RecordType, Str, Symbol,
+    UpvalueCell, Vector, set_header,
 };
 
 /// Floor for the collection threshold: below this, collecting costs more than the memory it
@@ -221,6 +221,12 @@ impl Heap {
     /// Allocate a record type descriptor. `name` and `field_names` are symbols.
     pub fn record_type(&mut self, name: Value, field_names: Vec<Value>) -> Value {
         self.alloc(RecordType::new(name, field_names))
+    }
+
+    /// Allocate a native-procedure value naming entry `index` of the VM's native-function
+    /// table.
+    pub fn native_proc(&mut self, name: &str, index: u32) -> Value {
+        self.alloc(NativeProc::new(Rc::from(name), index))
     }
 
     /// The exact integer `n`, as a fixnum when it fits and a bignum when it does not.
@@ -421,15 +427,20 @@ impl Heap {
     ///
     /// Anything not reachable from those is freed, `Drop` and all.
     ///
-    /// # This invalidates values
+    /// # Safety
     ///
-    /// Every [`Value`] that `roots` and the pin stack do not reach is dangling afterwards,
-    /// in the same way `Vec::clear` invalidates outstanding indices — except that a `Value`
-    /// looks exactly as usable as it did before. Callers must treat a collection as a
-    /// safepoint: at the moment it runs, the root set must be *complete*. Whether that
-    /// obligation should be enforced by making this function `unsafe` rather than the
-    /// accessors is an open question recorded in `docs/project_plan.org`; today it is
-    /// checked by a `debug_assert!` at the point of use (see [`Heap::get`]).
+    /// When this returns, every [`Value`] the caller will ever read again must have been
+    /// reachable — at the moment of the call — from `roots`, from the interner, or from the
+    /// pin stack. Any other `Value` is dangling afterwards, in the same way `Vec::set_len`
+    /// invalidates elements past the new length: the failure mode is usually silent, because
+    /// a later allocation reuses the block and the stale `Value` quietly starts naming a
+    /// different live object.
+    ///
+    /// This is the `docs/project_plan.org` resolution of the safe-versus-unsafe heap-access
+    /// contract: the obligation lives on the call site, not on every accessor. The
+    /// debug-build `LiveSet` registry behind [`Heap::get`] remains as a backstop — it turns a
+    /// violation of this contract into a loud `debug_assert!` failure in tests and under
+    /// Miri, rather than proving soundness itself.
     ///
     /// # Shaping the root set
     ///
@@ -441,12 +452,12 @@ impl Heap {
     /// struct Vm { heap: Heap, state: VmState }   // registers, globals, frames, wind stack
     /// unsafe impl Trace for VmState { /* ... */ }
     ///
-    /// self.heap.collect(&self.state)             // disjoint field borrows
+    /// unsafe { self.heap.collect(&self.state) }  // disjoint field borrows
     /// ```
     ///
     /// so that every safepoint reads the same way and a new kind of root is added in exactly
     /// one place.
-    pub fn collect(&mut self, roots: &dyn Trace) -> GcStats {
+    pub unsafe fn collect(&mut self, roots: &dyn Trace) -> GcStats {
         let live_before = self.live;
         let bytes_before = self.bytes;
 
@@ -592,6 +603,7 @@ unsafe fn trace_object(p: *mut GcHeader, tracer: &mut Tracer<'_>) {
             HeapTag::Record => (*p.cast::<Record>()).trace_fields(tracer),
             HeapTag::RecordType => (*p.cast::<RecordType>()).trace_fields(tracer),
             HeapTag::Closure => (*p.cast::<Closure>()).trace_fields(tracer),
+            HeapTag::NativeProc => (*p.cast::<NativeProc>()).trace_fields(tracer),
         }
     }
 }
@@ -624,6 +636,7 @@ unsafe fn drop_object(p: *mut GcHeader) {
             HeapTag::Record => drop_as::<Record>(p),
             HeapTag::RecordType => drop_as::<RecordType>(p),
             HeapTag::Closure => drop_as::<Closure>(p),
+            HeapTag::NativeProc => drop_as::<NativeProc>(p),
         }
     }
 }
@@ -660,6 +673,7 @@ unsafe fn object_bytes(p: *mut GcHeader) -> usize {
             HeapTag::Record => size_as::<Record>(p),
             HeapTag::RecordType => size_as::<RecordType>(p),
             HeapTag::Closure => size_as::<Closure>(p),
+            HeapTag::NativeProc => size_as::<NativeProc>(p),
         }
     }
 }
@@ -686,6 +700,14 @@ mod tests {
         fn trace(&self, tracer: &mut Tracer<'_>) {
             self.0.trace(tracer);
         }
+    }
+
+    /// Collect with `roots` as the complete root set.
+    fn collect(heap: &mut Heap, roots: &dyn Trace) -> GcStats {
+        // SAFETY: each test treats this as its one safepoint: everything the test reads
+        // afterwards is reachable from `roots`, the interner, or the pin stack, and values
+        // deliberately left unrooted are only ever asserted absent, never dereferenced.
+        unsafe { heap.collect(roots) }
     }
 
     #[test]
@@ -772,7 +794,7 @@ mod tests {
 
         assert_eq!(heap.live_objects(), 5);
 
-        let stats = heap.collect(&Roots(vec![kept]));
+        let stats = collect(&mut heap, &Roots(vec![kept]));
 
         assert_eq!(stats.freed, 3);
         assert_eq!(stats.live_before, 5);
@@ -802,7 +824,7 @@ mod tests {
         heap.get_mut::<Pair>(selfish).unwrap().cdr = selfish;
 
         assert_eq!(heap.live_objects(), 3);
-        let stats = heap.collect(&());
+        let stats = collect(&mut heap, &());
         assert_eq!(stats.freed, 3);
         assert_eq!(heap.live_objects(), 0);
     }
@@ -815,11 +837,11 @@ mod tests {
         let kept = heap.cons(Value::TRUE, Value::NIL);
 
         heap.string("first round");
-        assert_eq!(heap.collect(&Roots(vec![kept])).freed, 1);
+        assert_eq!(collect(&mut heap, &Roots(vec![kept])).freed, 1);
 
         heap.string("second round");
         heap.string("also second round");
-        assert_eq!(heap.collect(&Roots(vec![kept])).freed, 2);
+        assert_eq!(collect(&mut heap, &Roots(vec![kept])).freed, 2);
 
         assert_eq!(heap.live_objects(), 1);
         assert!(heap.contains(kept));
@@ -840,7 +862,7 @@ mod tests {
         assert_eq!(heap.live_objects(), 2);
 
         // Nothing roots them, and they survive anyway: the interner is a root.
-        let stats = heap.collect(&());
+        let stats = collect(&mut heap, &());
         assert_eq!(stats.freed, 0);
         assert_eq!(heap.symbol("lambda"), a);
         assert_eq!(heap.get::<Symbol>(a).unwrap().name.as_ref(), "lambda");
@@ -859,7 +881,7 @@ mod tests {
         assert_ne!(g1, interned);
         assert!(!heap.get::<Symbol>(g1).unwrap().interned);
 
-        let stats = heap.collect(&Roots(vec![g1]));
+        let stats = collect(&mut heap, &Roots(vec![g1]));
         assert_eq!(stats.freed, 1); // g2 goes; g1 is rooted, `interned` is in the table
         assert!(heap.contains(g1));
         assert!(heap.contains(interned));
@@ -876,19 +898,19 @@ mod tests {
             heap.string("unrooted");
 
             // Nothing but the pin stack knows about `first`.
-            let stats = heap.collect(&());
+            let stats = collect(&mut heap, &());
             assert_eq!(stats.freed, 1);
             assert!(heap.contains(first.get()));
 
             // A pin is a slot, so a native procedure can keep an accumulator rooted.
             first.set(heap.cons(Value::FALSE, first.get()));
-            heap.collect(&());
+            collect(&mut heap, &());
             first.get()
         };
 
         // The scope has closed, so the pin is released.
         assert!(pins.is_empty());
-        assert_eq!(heap.collect(&()).freed, 2);
+        assert_eq!(collect(&mut heap, &()).freed, 2);
         assert!(!heap.contains(survived));
     }
 
@@ -903,12 +925,12 @@ mod tests {
             let inner = pins.scope();
             inner.pin(heap.cons(Value::FALSE, Value::NIL));
             assert_eq!(pins.len(), 2);
-            assert_eq!(heap.collect(&()).freed, 0);
+            assert_eq!(collect(&mut heap, &()).freed, 0);
         }
         assert_eq!(pins.len(), 1);
 
         // The inner scope's pin is gone; the outer one still holds.
-        assert_eq!(heap.collect(&()).freed, 1);
+        assert_eq!(collect(&mut heap, &()).freed, 1);
         assert!(heap.contains(kept.get()));
     }
 
@@ -940,7 +962,7 @@ mod tests {
         let refill = outer.pin(heap.string("refill"));
 
         assert_eq!(
-            heap.collect(&()).freed,
+            collect(&mut heap, &()).freed,
             1,
             "only the temporary is unreachable"
         );
@@ -964,13 +986,13 @@ mod tests {
         // pin down with it.
         drop(outer);
 
-        assert_eq!(heap.collect(&()).freed, 1);
+        assert_eq!(collect(&mut heap, &()).freed, 1);
         assert!(!heap.contains(outer_value));
         assert_eq!(heap.get::<Str>(inner_pin.get()).unwrap().chars, "inner");
 
         drop(inner);
         assert!(pins.is_empty());
-        assert_eq!(heap.collect(&()).freed, 1);
+        assert_eq!(collect(&mut heap, &()).freed, 1);
     }
 
     /// Leaking a scope must fail in the safe direction: values stay rooted forever, which
@@ -993,7 +1015,7 @@ mod tests {
         };
 
         assert_eq!(pins.len(), 1);
-        assert_eq!(heap.collect(&()).freed, 0);
+        assert_eq!(collect(&mut heap, &()).freed, 0);
         assert_eq!(heap.get::<Str>(leaked).unwrap().chars, "leaked");
     }
 
@@ -1007,7 +1029,7 @@ mod tests {
     fn a_value_stale_after_a_collection_trips_the_debug_liveness_check() {
         let mut heap = Heap::new();
         let stale = heap.cons(Value::TRUE, Value::NIL);
-        assert_eq!(heap.collect(&()).freed, 1);
+        assert_eq!(collect(&mut heap, &()).freed, 1);
         let _ = heap.tag_of(stale);
     }
 
@@ -1028,7 +1050,7 @@ mod tests {
         }
         assert_eq!(heap.live_objects(), CELLS);
 
-        let stats = heap.collect(&head);
+        let stats = collect(&mut heap, &head);
         assert_eq!(stats.freed, 0);
         assert_eq!(heap.live_objects(), CELLS);
 
@@ -1041,7 +1063,7 @@ mod tests {
         }
         assert_eq!(n, CELLS);
 
-        assert_eq!(heap.collect(&()).freed, CELLS);
+        assert_eq!(collect(&mut heap, &()).freed, CELLS);
     }
 
     /// Marking a prototype tree must not recurse per level: `Heap::closure` accepts any
@@ -1068,13 +1090,13 @@ mod tests {
         }
 
         let f = heap.closure(Rc::clone(&proto), vec![]);
-        let stats = heap.collect(&Roots(vec![f]));
+        let stats = collect(&mut heap, &Roots(vec![f]));
         assert_eq!(stats.freed, 0);
         assert!(heap.contains(leaf_const), "marking must reach the leaf");
 
         // Free the closure; the local `proto` still owns the chain, so the sweep's drop
         // of the closure's `Rc` stays shallow.
-        assert_eq!(heap.collect(&()).freed, 2);
+        assert_eq!(collect(&mut heap, &()).freed, 2);
         assert_eq!(heap.live_objects(), 0);
 
         // Dismantle layer by layer. Dropping the whole chain at once would recurse in
@@ -1126,7 +1148,7 @@ mod tests {
         let peak = heap.bytes_allocated();
         assert!(peak >= 4096, "string storage should be counted, got {peak}");
 
-        heap.collect(&());
+        collect(&mut heap, &());
         assert_eq!(heap.bytes_allocated(), 0);
         assert_eq!(heap.live_objects(), 0);
     }
@@ -1157,7 +1179,7 @@ mod tests {
         assert_eq!(heap.tag_of(f), Some(HeapTag::Closure));
 
         // Only the closure is rooted; everything else must be reached through it.
-        let stats = heap.collect(&Roots(vec![f]));
+        let stats = collect(&mut heap, &Roots(vec![f]));
         assert_eq!(stats.freed, 0);
         assert!(heap.contains(in_child_consts));
         assert!(heap.contains(in_parent_consts));
@@ -1169,7 +1191,7 @@ mod tests {
 
         // Unrooted, the closure and everything it alone reached is freed — and the
         // prototype survives on its own `Rc`, untouched by the collector.
-        assert_eq!(heap.collect(&()).freed, 4);
+        assert_eq!(collect(&mut heap, &()).freed, 4);
         assert_eq!(heap.live_objects(), 0);
         assert_eq!(proto.consts.len(), 1);
     }
@@ -1191,12 +1213,12 @@ mod tests {
         assert_eq!(Rc::strong_count(&proto), 3);
 
         // f dies, g lives: the prototype and its constant must survive.
-        let stats = heap.collect(&Roots(vec![g]));
+        let stats = collect(&mut heap, &Roots(vec![g]));
         assert_eq!(stats.freed, 1);
         assert!(heap.contains(konst));
         assert_eq!(Rc::strong_count(&proto), 2);
 
-        heap.collect(&());
+        collect(&mut heap, &());
         assert_eq!(Rc::strong_count(&proto), 1);
         let _ = f;
     }
@@ -1211,12 +1233,12 @@ mod tests {
         let r = heap.record(rt, vec![payload]);
 
         // Only the record is rooted; the type and the field must be reached through it.
-        let stats = heap.collect(&Roots(vec![r]));
+        let stats = collect(&mut heap, &Roots(vec![r]));
         assert_eq!(stats.freed, 0);
         assert!(heap.contains(rt));
         assert!(heap.contains(payload));
 
-        assert_eq!(heap.collect(&()).freed, 3);
+        assert_eq!(collect(&mut heap, &()).freed, 3);
     }
 
     #[test]
@@ -1227,9 +1249,24 @@ mod tests {
         let vec_val = heap.vector(vec![Value::NIL, inner]);
         let cell = heap.upvalue_cell(vec_val);
 
-        assert_eq!(heap.collect(&Roots(vec![cell])).freed, 0);
+        assert_eq!(collect(&mut heap, &Roots(vec![cell])).freed, 0);
         assert!(heap.contains(inner));
 
-        assert_eq!(heap.collect(&()).freed, 3);
+        assert_eq!(collect(&mut heap, &()).freed, 3);
+    }
+
+    #[test]
+    fn native_procs_allocate_and_are_collected_like_any_other_object() {
+        let mut heap = Heap::new();
+
+        let f = heap.native_proc("car", 3);
+        assert_eq!(heap.tag_of(f), Some(HeapTag::NativeProc));
+
+        let proc = heap.get::<NativeProc>(f).unwrap();
+        assert_eq!(proc.name.as_ref(), "car");
+        assert_eq!(proc.index, 3);
+
+        assert_eq!(collect(&mut heap, &Roots(vec![f])).freed, 0);
+        assert_eq!(collect(&mut heap, &()).freed, 1);
     }
 }

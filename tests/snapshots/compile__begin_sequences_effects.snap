@@ -1,0 +1,10 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=4 consts=0 upvals=0 protos=0
+0000  LOADI       r3, 1
+0001  PRIMCALL    r2, 2, 32             ; prim 32, 1 arg
+0002  MOVE        r1, r2
+0003  LOADI       r0, 2
+0004  RETURN1     r0

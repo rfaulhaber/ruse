@@ -366,6 +366,7 @@ fn const_text(heap: &Heap, v: Value) -> String {
         Some(HeapTag::UpvalueCell) => "#<upvalue>".to_string(),
         Some(HeapTag::Record) => "#<record>".to_string(),
         Some(HeapTag::RecordType) => "#<record-type>".to_string(),
+        Some(HeapTag::NativeProc) => "#<native-proc>".to_string(),
         None => "#<invalid>".to_string(),
     }
 }

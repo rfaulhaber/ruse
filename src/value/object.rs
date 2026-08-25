@@ -515,3 +515,48 @@ unsafe impl HeapObject for RecordType {
         self.field_names.capacity() * size_of::<Value>()
     }
 }
+
+/// A primitive procedure implemented in Rust.
+///
+/// The object carries only the *identity* of the primitive: `index` names an entry in
+/// the VM's native-function table, which owns the function pointer and arity metadata.
+/// Keeping the table as the single authority means a serialized prototype could never
+/// smuggle in a stale function pointer, and the printer can render the name without
+/// consulting the VM.
+#[repr(C)]
+pub struct NativeProc {
+    pub(crate) header: GcHeader,
+    /// The primitive's name, for `write`/`display` and error messages.
+    pub name: Rc<str>,
+    /// Index into the VM's native-function table.
+    pub index: u32,
+}
+
+impl NativeProc {
+    pub(crate) fn new(name: Rc<str>, index: u32) -> Self {
+        Self {
+            header: GcHeader::unlinked(HeapTag::NativeProc),
+            name,
+            index,
+        }
+    }
+}
+
+impl Header for NativeProc {
+    fn header_mut(&mut self) -> &mut GcHeader {
+        &mut self.header
+    }
+}
+
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. A `NativeProc` owns its name and no `Value`s, so
+// there is nothing to trace.
+unsafe impl HeapObject for NativeProc {
+    const TAG: HeapTag = HeapTag::NativeProc;
+
+    fn trace_fields(&self, _tracer: &mut Tracer<'_>) {}
+
+    fn extra_bytes(&self) -> usize {
+        self.name.len()
+    }
+}

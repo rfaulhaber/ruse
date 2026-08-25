@@ -1,0 +1,14 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=4 consts=2 upvals=0 protos=0
+0000  LOADIMM     r2, #f
+0001  TEST        r2, 0                 ; skip if r2
+0002  JMP         +2                    ; -> 0005
+0003  GETGLOBAL   r1, k0                ; +
+0004  JMP         +1                    ; -> 0006
+0005  GETGLOBAL   r1, k1                ; *
+0006  LOADI       r2, 3
+0007  LOADI       r3, 4
+0008  TAILCALL    r1, 3                 ; 2 args

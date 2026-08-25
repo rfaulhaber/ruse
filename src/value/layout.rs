@@ -36,7 +36,8 @@
 use core::mem::{align_of, offset_of, size_of};
 
 use crate::value::object::{
-    Bignum, Bytevector, Closure, Pair, Record, RecordType, Str, Symbol, UpvalueCell, Vector,
+    Bignum, Bytevector, Closure, NativeProc, Pair, Record, RecordType, Str, Symbol, UpvalueCell,
+    Vector,
 };
 
 /// Bits set in every boxed value: the sign bit, the eleven exponent bits and the quiet-NaN
@@ -128,6 +129,9 @@ pub enum HeapTag {
     Record = 8,
     /// [`RecordType`]: the descriptor such instances point at.
     RecordType = 9,
+    /// [`NativeProc`]: a primitive procedure implemented in Rust; names an entry in the
+    /// VM's native-function table.
+    NativeProc = 10,
 }
 
 /// The first field of every heap object.
@@ -234,6 +238,7 @@ const _: () = {
     assert!(offset_of!(Bignum, header) == 0);
     assert!(offset_of!(Record, header) == 0);
     assert!(offset_of!(RecordType, header) == 0);
+    assert!(offset_of!(NativeProc, header) == 0);
 
     // Payloads start where the header ends. These catch a field reordering or a lost
     // `repr(C)` — either of which would leave the collector reading a `Vec`'s pointer as a
@@ -253,6 +258,8 @@ const _: () = {
     assert!(offset_of!(Record, fields) == 24);
     assert!(offset_of!(RecordType, name) == 16);
     assert!(offset_of!(RecordType, field_names) == 24);
+    assert!(offset_of!(NativeProc, name) == 16);
+    assert!(offset_of!(NativeProc, index) == 32);
 
     // A pair is the allocation the runtime makes most; keep an eye on its size.
     assert!(size_of::<Pair>() == 32);

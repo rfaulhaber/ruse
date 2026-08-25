@@ -1,0 +1,9 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, \"(+ 10 1)\")"
+---
+; proto main: nparams=0 has_rest=false window=4 consts=1 upvals=0 protos=0
+0000  GETGLOBAL   r1, k0                ; +
+0001  LOADI       r2, 10
+0002  LOADI       r3, 1
+0003  TAILCALL    r1, 3                 ; 2 args
