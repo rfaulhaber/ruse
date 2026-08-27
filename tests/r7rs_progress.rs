@@ -252,10 +252,10 @@ const SHIM: &str = "
 (define (test-end) #f)
 ";
 
-/// The M3 exit criterion for the suite: the first non-zero slice of it passes. Ratchet, not a
-/// target — bump it when a later milestone makes more of the suite runnable, never lower it.
-/// Set to the observed pass count on M3's language slice.
-const MIN_PASSED: i64 = 115;
+/// The suite ratchet, not a target — bump it when a later milestone makes more of the
+/// suite runnable, never lower it. 115 was M3's language slice; 156 is M4's (closures,
+/// derived forms, variadics, quasiquote).
+const MIN_PASSED: i64 = 156;
 
 #[test]
 fn r7rs_suite_slice() {

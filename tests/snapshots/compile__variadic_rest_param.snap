@@ -1,0 +1,12 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=2 consts=1 upvals=0 protos=1
+0000  CLOSURE     r1, p0                ; f
+0001  SETGLOBAL   r1, k0                ; f
+0002  LOADIMM     r0, unspecified
+0003  RETURN1     r0
+
+; proto main.p0 (f): nparams=1 has_rest=true window=3 consts=0 upvals=0 protos=0
+0000  RETURN1     r1

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::Expr;
-use crate::bytecode::{Insn, Op, Proto};
+use crate::bytecode::{Insn, Op, Proto, UpvalDesc};
 use crate::gc::Heap;
 use crate::rt::prims::PrimTable;
 use crate::span::Span;
@@ -60,19 +60,62 @@ pub(crate) fn compile_expr(
     Ok(Rc::new(f.into_proto()))
 }
 
+/// One named binding in a scope. `initialized` is false only inside a `letrec*` init
+/// region, where the register still holds the black hole; a direct (same-function) read
+/// of such a binding is the forward reference R7RS calls an error, caught here at
+/// compile time. Captures from nested lambdas are exempt — they read at run time,
+/// where the VM's black-hole check takes over.
+struct Binding {
+    name: String,
+    reg: u8,
+    initialized: bool,
+}
+
+/// One lexical scope: its bindings, the first register it owns, and whether any of its
+/// bindings has been captured by a nested lambda — the flag that decides if scope exit
+/// must emit `CLOSEUPVALS`.
+struct Scope {
+    base: u8,
+    captured: bool,
+    bindings: Vec<Binding>,
+}
+
+impl Scope {
+    fn new(base: u8, names: impl IntoIterator<Item = (String, u8)>) -> Self {
+        Self {
+            base,
+            captured: false,
+            bindings: names
+                .into_iter()
+                .map(|(name, reg)| Binding {
+                    name,
+                    reg,
+                    initialized: true,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Per-function compilation state: Lua's `FuncState`.
 #[derive(Default)]
 struct Func {
     name: Option<String>,
     nparams: u8,
+    has_rest: bool,
     code: Vec<Insn>,
     spans: Vec<Span>,
     consts: Vec<Value>,
     /// Dedup for constants compared by bits: immediates and interned symbols.
     const_map: HashMap<u64, u32>,
     protos: Vec<Rc<Proto>>,
-    /// Lexical scopes: name → register, innermost scope last.
-    scopes: Vec<Vec<(String, u8)>>,
+    /// Lexical scopes, innermost last.
+    scopes: Vec<Scope>,
+    /// This function's upvalues in capture order: the name, and where the value comes
+    /// from — [`Proto::upvals`] in the making. Name-keyed dedup is sound because a
+    /// nested function is compiled at one point in its parent, where each free name
+    /// resolves to exactly one binding.
+    upvals: Vec<(String, UpvalDesc)>,
     /// First free register; temporaries are allocated here and released by mark.
     freereg: u8,
     max_window: u8,
@@ -84,19 +127,32 @@ impl Func {
             name: self.name,
             code: self.code,
             consts: self.consts,
-            upvals: Vec::new(),
+            upvals: self.upvals.into_iter().map(|(_, desc)| desc).collect(),
             protos: self.protos,
             nparams: self.nparams,
-            has_rest: false,
+            has_rest: self.has_rest,
             // A function that allocated nothing still owns r0 for its result.
             max_window: self.max_window.max(1),
             spans: self.spans,
         }
     }
+
+    /// The innermost binding named `name`, together with which scope holds it.
+    fn lookup(&self, name: &str) -> Option<(usize, &Binding)> {
+        for (si, scope) in self.scopes.iter().enumerate().rev() {
+            for b in scope.bindings.iter().rev() {
+                if b.name == name {
+                    return Some((si, b));
+                }
+            }
+        }
+        None
+    }
 }
 
 enum Resolved {
     Local(u8),
+    Upval(u8),
     Global,
 }
 
@@ -153,45 +209,98 @@ impl Compiler<'_> {
     // ------------------------------------------------------------ names
 
     fn resolve(&mut self, name: &str, span: Span) -> Result<Resolved, CompileError> {
-        if let Some(r) = self.peek_local(name) {
-            return Ok(Resolved::Local(r));
+        if let Some(f) = self.funcs.last()
+            && let Some((_, b)) = f.lookup(name)
+        {
+            if !b.initialized {
+                return Err(CompileError::PrematureReference {
+                    name: name.to_string(),
+                    span: ss(span),
+                });
+            }
+            return Ok(Resolved::Local(b.reg));
         }
-        if self.is_enclosing_local(name) {
-            return Err(CompileError::CaptureUnsupported {
-                name: name.to_string(),
+        let top = self.funcs.len().saturating_sub(1);
+        match self.find_upval(top, name, span)? {
+            Some(u) => Ok(Resolved::Upval(u)),
+            None => Ok(Resolved::Global),
+        }
+    }
+
+    /// An *initialized* binding in the current function, if any — the fast path for
+    /// in-place operands and tail returns. Uninitialized `letrec*` bindings are
+    /// invisible here so their references route through [`Compiler::resolve`], which
+    /// reports them.
+    fn peek_local(&mut self, name: &str) -> Option<u8> {
+        self.funcs
+            .last()?
+            .lookup(name)
+            .filter(|(_, b)| b.initialized)
+            .map(|(_, b)| b.reg)
+    }
+
+    /// Resolve `name` as an upvalue of function `fi`, materializing capture descriptors
+    /// down the chain (Lua's `singlevaraux`). A binding found in an enclosing function
+    /// becomes `ParentLocal` there and `ParentUpval` in every function between; the
+    /// scope that owns the register is flagged as captured so its exit closes the cell.
+    /// Recursion depth is lexical nesting depth, bounded by the reader's own recursion.
+    fn find_upval(
+        &mut self,
+        fi: usize,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<u8>, CompileError> {
+        if let Some(i) = self.funcs[fi].upvals.iter().position(|(n, _)| n == name) {
+            return Ok(Some(i as u8));
+        }
+        if fi == 0 {
+            return Ok(None);
+        }
+        let parent_reg = {
+            let parent = &mut self.funcs[fi - 1];
+            let mut found = None;
+            'scopes: for scope in parent.scopes.iter_mut().rev() {
+                for b in scope.bindings.iter().rev() {
+                    if b.name == name {
+                        scope.captured = true;
+                        found = Some(b.reg);
+                        break 'scopes;
+                    }
+                }
+            }
+            found
+        };
+        let desc = match parent_reg {
+            Some(reg) => UpvalDesc::ParentLocal(reg),
+            None => match self.find_upval(fi - 1, name, span)? {
+                Some(u) => UpvalDesc::ParentUpval(u),
+                None => return Ok(None),
+            },
+        };
+        let f = &mut self.funcs[fi];
+        if f.upvals.len() >= 256 {
+            return Err(CompileError::TooMany {
+                what: "upvalues",
+                count: f.upvals.len(),
                 span: ss(span),
             });
         }
-        Ok(Resolved::Global)
+        f.upvals.push((name.to_string(), desc));
+        Ok(Some((f.upvals.len() - 1) as u8))
     }
 
-    /// A binding in the *current* function, if any.
-    fn peek_local(&mut self, name: &str) -> Option<u8> {
-        let f = self.func();
-        for scope in f.scopes.iter().rev() {
-            for (n, r) in scope.iter().rev() {
-                if n == name {
-                    return Some(*r);
-                }
-            }
-        }
-        None
-    }
-
-    /// A binding in an *enclosing* function — capturable only from M4 on.
+    /// A binding (initialized or not) in an *enclosing* function — capturable, and
+    /// therefore shadowing any like-named global for licensing purposes.
     fn is_enclosing_local(&mut self, name: &str) -> bool {
         let outer = self.funcs.len().saturating_sub(1);
-        self.funcs[..outer].iter().any(|f| {
-            f.scopes
-                .iter()
-                .any(|scope| scope.iter().any(|(n, _)| n == name))
-        })
+        self.funcs[..outer].iter().any(|f| f.lookup(name).is_some())
     }
 
     /// Whether `name` may be compiled to its primitive: not a local anywhere, and still
     /// the untouched boot-time global.
     fn primitive_licensed(&mut self, name: &str) -> bool {
-        if self.peek_local(name).is_some() || self.is_enclosing_local(name) {
+        let shadowed = self.funcs.last().is_some_and(|f| f.lookup(name).is_some());
+        if shadowed || self.is_enclosing_local(name) {
             return false;
         }
         let sym = self.heap.symbol(name);
@@ -332,6 +441,9 @@ impl Compiler<'_> {
                             self.emit(Insn::iabc(Op::Move, dst, r, 0), *span);
                         }
                     }
+                    Resolved::Upval(u) => {
+                        self.emit(Insn::iabc(Op::GetUpval, dst, u, 0), *span);
+                    }
                     Resolved::Global => self.emit_get_global(name, dst, *span)?,
                 }
                 Ok(false)
@@ -346,6 +458,14 @@ impl Compiler<'_> {
                         if dst != r {
                             self.emit_load_value(Value::UNSPECIFIED, dst, *span)?;
                         }
+                    }
+                    Resolved::Upval(u) => {
+                        let m = self.mark();
+                        let tv = self.alloc(*span)?;
+                        self.expr(value, tv, false)?;
+                        self.emit(Insn::iabc(Op::SetUpval, tv, u, 0), *span);
+                        self.free_to(m);
+                        self.emit_load_value(Value::UNSPECIFIED, dst, *span)?;
                     }
                     Resolved::Global => {
                         let m = self.mark();
@@ -379,18 +499,23 @@ impl Compiler<'_> {
                 span,
             } => {
                 let m = self.mark();
-                let mut scope = Vec::with_capacity(bindings.len());
+                let mut names = Vec::with_capacity(bindings.len());
                 for (name, init) in bindings {
                     let r = self.alloc(*span)?;
                     self.expr(init, r, false)?;
-                    scope.push((name.clone(), r));
+                    names.push((name.clone(), r));
                 }
-                self.func().scopes.push(scope);
+                self.func().scopes.push(Scope::new(m, names));
                 let terminated = self.body(body, dst, tail, *span);
-                self.func().scopes.pop();
+                self.exit_scope(&terminated, *span);
                 self.free_to(m);
                 terminated
             }
+            Ir::LetRec {
+                bindings,
+                body,
+                span,
+            } => self.letrec(bindings, body, dst, tail, *span),
             Ir::Lambda(l) => {
                 let index = self.lambda(l)?;
                 self.emit(Insn::iabx(Op::Closure, dst, index), l.span);
@@ -438,6 +563,75 @@ impl Compiler<'_> {
             return Ok(true);
         }
         self.expr(ir, dst, false)
+    }
+
+    // ------------------------------------------------------------ scopes and letrec
+
+    /// Pop the innermost scope and, if a nested lambda captured any of its bindings and
+    /// control falls through (non-tail), emit `CLOSEUPVALS` so the cells detach before
+    /// the registers are reused. A terminated body needs no instruction: the VM closes a
+    /// frame's remaining upvalues on `RETURN`/`TAILCALL`.
+    fn exit_scope(&mut self, terminated: &Result<bool, CompileError>, span: Span) {
+        let Some(scope) = self.func().scopes.pop() else {
+            return;
+        };
+        if scope.captured && matches!(terminated, Ok(false)) {
+            self.emit(Insn::iabc(Op::CloseUpvals, scope.base, 0, 0), span);
+        }
+    }
+
+    /// `letrec*` (decision: `letrec` compiles identically — every program correct under
+    /// unordered `letrec` is also correct left-to-right): allocate all registers, load
+    /// the `undefined` black hole into each, then evaluate the inits in order, marking
+    /// each binding usable as its init completes. A same-function reference to a
+    /// not-yet-marked binding is a compile-time [`CompileError::PrematureReference`];
+    /// references from nested lambdas capture the register and are policed at run time
+    /// by `GETUPVAL`'s black-hole check.
+    fn letrec(
+        &mut self,
+        bindings: &[(String, Ir)],
+        body: &[Ir],
+        dst: u8,
+        tail: bool,
+        span: Span,
+    ) -> Result<bool, CompileError> {
+        let m = self.mark();
+        let mut regs = Vec::with_capacity(bindings.len());
+        for _ in bindings {
+            let r = self.alloc(span)?;
+            self.emit_load_value(Value::UNDEFINED, r, span)?;
+            regs.push(r);
+        }
+        let scope = Scope {
+            base: m,
+            captured: false,
+            bindings: bindings
+                .iter()
+                .zip(&regs)
+                .map(|((name, _), &reg)| Binding {
+                    name: name.clone(),
+                    reg,
+                    initialized: false,
+                })
+                .collect(),
+        };
+        self.func().scopes.push(scope);
+        for (i, (_, init)) in bindings.iter().enumerate() {
+            let compiled = self.expr(init, regs[i], false);
+            if let Err(e) = compiled {
+                self.func().scopes.pop();
+                return Err(e);
+            }
+            if let Some(scope) = self.func().scopes.last_mut()
+                && let Some(b) = scope.bindings.get_mut(i)
+            {
+                b.initialized = true;
+            }
+        }
+        let terminated = self.body(body, dst, tail, span);
+        self.exit_scope(&terminated, span);
+        self.free_to(m);
+        terminated
     }
 
     // ------------------------------------------------------------ if
@@ -569,32 +763,38 @@ impl Compiler<'_> {
     // ------------------------------------------------------------ lambda
 
     fn lambda(&mut self, l: &IrLambda) -> Result<u16, CompileError> {
-        let Ok(nparams) = u8::try_from(l.params.len()) else {
+        // The rest parameter, when present, is an ordinary named local in register
+        // `nparams` — the VM's call entry puts the collected list there.
+        let total = l.params.len() + usize::from(l.rest.is_some());
+        let Ok(nregs) = u8::try_from(total) else {
             return Err(CompileError::WindowOverflow {
-                needed: l.params.len(),
+                needed: total,
                 max: usize::from(Proto::MAX_WINDOW),
                 span: ss(l.span),
             });
         };
-        if nparams >= Proto::MAX_WINDOW {
+        if nregs >= Proto::MAX_WINDOW {
             return Err(CompileError::WindowOverflow {
-                needed: usize::from(nparams) + 1,
+                needed: usize::from(nregs) + 1,
                 max: usize::from(Proto::MAX_WINDOW),
                 span: ss(l.span),
             });
         }
-        let scope = l
+        let names = l
             .params
             .iter()
+            .cloned()
+            .chain(l.rest.clone())
             .enumerate()
-            .map(|(i, p)| (p.clone(), i as u8))
-            .collect();
+            .map(|(i, p)| (p, i as u8));
+        let scope = Scope::new(0, names);
         self.funcs.push(Func {
             name: l.name.clone(),
-            nparams,
+            nparams: l.params.len() as u8,
+            has_rest: l.rest.is_some(),
             scopes: vec![scope],
-            freereg: nparams,
-            max_window: nparams,
+            freereg: nregs,
+            max_window: nregs,
             ..Func::default()
         });
 

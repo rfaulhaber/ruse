@@ -68,6 +68,10 @@ pub enum VmErrorKind {
     },
     #[error("call stack overflow ({limit} frames); deep recursion must be in tail position")]
     StackOverflow { limit: usize },
+    /// A captured variable was read while it still held the `letrec*` black hole — a
+    /// forward reference inside a `letrec`/`letrec*`/internal-define init region.
+    #[error("a letrec (or internal define) variable was used before its initialization")]
+    UninitializedVariable,
     #[error("vector index {index} is out of bounds for length {len}")]
     IndexOutOfBounds { index: i64, len: usize },
     #[error("output failed: {message}")]

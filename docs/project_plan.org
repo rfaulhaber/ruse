@@ -34,15 +34,20 @@ Verified against the working tree, not against the roadmap's own claims.
 - =src/bytecode/= — the RBC-1 layer (M2): ~Insn~ with spec §3.1 accessors and symmetric
   encoders, the frozen 50-opcode ~Op~ table, ~Proto~ with ~UpvalDesc~ capture tables, and
   the load-time verifier.
-- =src/vm/= — the M3 register VM: the flat register file, ~Frame~ stack and dispatch
-  loop, the append-only ~Globals~ slot table, the one GC safepoint with the VM state as
-  root set, and typed ~VmError~ s throughout.
+- =src/vm/= — the register VM (M3, closures completed in M4): the flat register file,
+  ~Frame~ stack and dispatch loop, the append-only ~Globals~ slot table, the open→closed
+  upvalue machinery (open cells name registers by absolute index; ~RETURN~/~TAILCALL~
+  close the dying frame's cells), rest-argument collection at call entry, the one GC
+  safepoint with the VM state — open-upvalue list included — as root set, and typed
+  ~VmError~ s throughout.
 - =src/rt/= — opcode and primitive semantics as standalone functions (habit 2): the M3
   numeric slice, pairs, vectors, ~eqv?~/~equal?~, the ~display~/~write~ printer, and the
-  ~PRIMCALL~ native-function table with ~35 primitives, each also a global.
+  ~PRIMCALL~ native-function table with ~37 primitives, each also a global.
 - =src/compiler/= — decision C's two passes: ~Expr~ → typed Core IR (syntax, keyword
-  shadowing) and destination-register + tail-flag codegen over a Lua-style ~Func~
-  allocator, with licensed primitive inlining and the ~ADDI~ peephole.
+  shadowing, and since M4 the derived forms as lowering-time desugarings plus internal
+  defines as ~letrec*~) and destination-register + tail-flag codegen over a Lua-style
+  ~Func~ allocator with Lua-style upvalue resolution, licensed primitive inlining and
+  the ~ADDI~ peephole.
 - =src/disasm.rs= — the disassembler; its text is the frozen test surface, snapshot-locked
   by =tests/disasm.rs= and now also by =tests/compile.rs= for compiler output.
 - =src/repl.rs= — a real read–eval–print loop. =src/main.rs= — REPL or file evaluation.
@@ -56,10 +61,12 @@ Verified against the working tree, not against the roadmap's own claims.
 
 ** What does not exist
 
-Closures capture nothing yet (upvalues are M4), and there are no derived forms, no
-numeric tower beyond the M3 fixnum/bignum/flonum slice, no macro expander, no ports, no
-first-class control, and only the minimal stdlib. Every opcode owned by a later
-milestone executes as a typed ~Unimplemented~ error rather than ~unreachable!~.
+There is no numeric tower beyond the M3 fixnum/bignum/flonum slice, no reader breadth
+beyond it either (no vector literals, datum labels or full escapes — M6), no macro
+expander, no ports, no first-class control (multiple values included, which is why
+~let-values~ only binds single-value shapes), and only the minimal stdlib. Every opcode
+owned by a later milestone executes as a typed ~Unimplemented~ error rather than
+~unreachable!~.
 
 ** Two corrections to the recorded status, since fixed
 
@@ -456,22 +463,78 @@ Adopted from the triage's dropped-as-duplicate pile: ~singleton_ordinal~ in the 
 was a positional second copy of the ~LOADIMM~ ordinal table; both it and the VM's mirror
 now pair each constant with its own =layout.rs= ordinal, so there is no order to drift.
 
-* TODO [#B] M4 — Closures, upvalues, binding and derived forms [/]    :effort_L:
+* DONE [#B] M4 — Closures, upvalues, binding and derived forms [4/4]  :effort_L:
+CLOSED: [2026-08-27 Thu]
 
 *Deps:* M3.
-*Exit:* spec §6.2 ~make-counter~ yields two *independent* counters; ~set!~ on a captured
-variable mutates the shared binding; the ~let~-family/~cond~/~case~/~and~/~or~ slice passes.
+*Exit met:* spec §6.2 ~make-counter~ yields two *independent* counters and ~set!~ on a
+captured variable mutates the one binding both closures share (both pinned in
+=tests/eval.rs=, the codegen snapshot-locked as =make_counter_closure=); the
+~let~-family/~cond~/~case~/~and~/~or~ slice passes, lifting the suite driver's ratchet
+from 115 to *156 passing tests* (the same two M7-collateral failures remain, documented
+in the driver). Named ~let~ and ~do~ compile to ~TAILCALL~ loops — a hundred-thousand
+-iteration ~do~ completes under a frame limit of 50 — and per-iteration captures get
+independent cells because ~TAILCALL~ closes the reused frame's upvalues first. Clippy
+~-D warnings~ and fmt clean; Miri green under both aliasing models with the open-upvalue
+list in the traced root set.
 
-- [ ] CLOSURE with upvalue descriptors; Lua-style open→closed upvalue list;
+- [X] CLOSURE with upvalue descriptors; Lua-style open→closed upvalue list;
       GET/SETUPVAL through cells with the SETUPVAL barrier; CLOSEUPVALS and ~JMP A>0~
       for loop-exit closing
-- [ ] Variadic/rest lambdas (~has_rest~); internal defines as ~letrec*~ with the
+- [X] Variadic/rest lambdas (~has_rest~); internal defines as ~letrec*~ with the
       ~undefined~ black hole and forward-reference errors
-- [ ] Derived forms as core syntax until M8: ~and~/~or~/~when~/~unless~/~cond~ (incl. ~=>~,
+- [X] Derived forms as core syntax until M8: ~and~/~or~/~when~/~unless~/~cond~ (incl. ~=>~,
       ~else~), ~case~ (EQV chains incl. ~=>~ clauses; JMPIDX deferred), ~let*~/~letrec~/
       ~letrec*~/named ~let~/~do~, ~let-values~/~let*-values~
-- [ ] ~quasiquote~/~unquote~/~unquote-splicing~ with depth tracking (ensure ~append~ and
-      ~list->vector~ exist before this codegen lands)
+- [X] ~quasiquote~/~unquote~/~unquote-splicing~ with depth tracking (~append~ and
+      ~list->vector~ landed first, as natives appended to the table so existing
+      ~PRIMCALL~ indices — unfrozen but snapshot-visible — stayed put)
+
+** What M4 settled beyond the checklist
+
+- *An open upvalue names its register by absolute index, not by pointer.*
+  ~UpvalueCell~ gained a crate-private ~location: Option<usize>~: ~Some(abs)~ while the
+  variable still lives in the register file (a ~Vec~ that reallocates — a pointer would
+  dangle), ~None~ once closed and ~value~ is the storage. The VM keeps the open list as
+  ~(index, cell)~ pairs on ~VmState~, traced as roots — a cell must survive even after
+  every closure sharing it dies, because closing writes to it.
+- *Closing is a copy, so the VM closes eagerly and the compiler sparsely.* ~RETURN~ and
+  ~TAILCALL~ close everything at or above the dying frame's base (covering every tail
+  path with no trailing instruction, and ~TAILCALL~ *before* sliding arguments over the
+  old locals); ~Vm::execute~'s teardown closes from 0 so closures escaping an error
+  unwind keep the values they had. The compiler emits ~CLOSEUPVALS~ only where a
+  captured ~let~/~letrec~ scope falls through *non-tail* — the one case where the
+  register is reused while the frame lives — tracked by a per-scope ~captured~ flag set
+  during upvalue resolution.
+- *Upvalue resolution is Lua's ~singlevaraux~*, name-keyed per function (sound because a
+  nested lambda is compiled at one point in its parent, where a free name means exactly
+  one binding): parent local → ~ParentLocal~ + capture flag; otherwise recurse and chain
+  ~ParentUpval~ descriptors down. The M2 verifier needed no changes — its ~UpvalDesc~
+  checks were written to the final shape.
+- *letrec ≡ letrec* by decision*: any program correct under unordered ~letrec~ behaves
+  identically left-to-right. Forward references split by detectability: a same-function
+  read inside the init region is a *compile-time* ~PrematureReference~ (the emitter
+  marks each binding initialized as its init completes); a read routed through a
+  capture is caught at *run time* by ~GETUPVAL~ refusing to deliver ~undefined~ — which
+  is exactly what layout ordinal 0 was reserved for in M1.
+- *Derived forms are lowering-time constructions, not macros yet* — the R7RS §7.3
+  desugarings built directly as IR, with two accepted hygiene limits recorded in
+  =src/compiler/ir.rs= for M8 to erase: generated ~cons~/~append~/~list~/~eqv?~ calls
+  resolve like user code, and ~else~/~=>~ match literally when not lexically bound.
+  Compiler temporaries (~or~, ~cond~ ~=>~, ~case~'s key) use space-prefixed names no
+  reader token can collide with. ~and~ needs no temporary at all: ~#f~ is the only
+  false value, so the failing test's value *is* ~#f~.
+- *~let-values~/~define-values~ ship as their single-value slice*: ~((x) e)~ binds
+  directly, a lone rest formal binds the one-element list, and any formals needing a
+  different value count is a typed ~Unsupported~ naming M7 — where multiple values
+  actually arrive with the open-ended CALL/RETURN counts. Honest refusal over a fake
+  ~values~.
+- *Rest-argument collection is call-entry metadata, as the spec prescribed*: no opcode.
+  ~CALL~/~TAILCALL~ cons ~R[nparams..nargs]~ into a list before sizing the callee
+  window and store it after — with no extras the rest register sits above the argument
+  block and may not exist yet. Extra-argument registers left above a smaller callee
+  window go stale inside the *caller's* still-traced window, which the M3 root-set
+  invariant already licenses.
 
 * TODO [#B] M5 — Numeric tower and the §7.1.1 number reader [/]      :effort_XL:
 

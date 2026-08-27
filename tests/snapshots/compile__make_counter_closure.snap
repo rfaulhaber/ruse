@@ -1,0 +1,23 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=2 consts=1 upvals=0 protos=1
+0000  CLOSURE     r1, p0                ; make-counter
+0001  SETGLOBAL   r1, k0                ; make-counter
+0002  LOADIMM     r0, unspecified
+0003  RETURN1     r0
+
+; proto main.p0 (make-counter): nparams=0 has_rest=false window=2 consts=0 upvals=0 protos=1
+0000  LOADI       r1, 0
+0001  CLOSURE     r0, p0
+0002  RETURN1     r0
+
+; proto main.p0.p0: nparams=0 has_rest=false window=4 consts=0 upvals=1 protos=0
+;   u0 <- parent local r1
+0000  GETUPVAL    r3, u0
+0001  ADDI        r2, r3, 1
+0002  SETUPVAL    r2, u0                ; u0 := r2
+0003  LOADIMM     r1, unspecified
+0004  GETUPVAL    r0, u0
+0005  RETURN1     r0

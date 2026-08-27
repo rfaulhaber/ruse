@@ -1,0 +1,21 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=1 consts=0 upvals=0 protos=1
+0000  CLOSURE     r0, p0
+0001  RETURN1     r0
+
+; proto main.p0: nparams=1 has_rest=false window=2 consts=0 upvals=0 protos=1
+0000  CLOSURE     r1, p0
+0001  RETURN1     r1
+
+; proto main.p0.p0: nparams=0 has_rest=false window=1 consts=0 upvals=1 protos=1
+;   u0 <- parent local r0
+0000  CLOSURE     r0, p0
+0001  RETURN1     r0
+
+; proto main.p0.p0.p0: nparams=0 has_rest=false window=1 consts=0 upvals=1 protos=0
+;   u0 <- parent upvalue u0
+0000  GETUPVAL    r0, u0
+0001  RETURN1     r0

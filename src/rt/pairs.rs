@@ -58,6 +58,22 @@ pub fn list(heap: &mut Heap, items: &[Value]) -> Value {
     acc
 }
 
+/// The elements of the proper list `v`, in order. `op` names the caller in the
+/// wrong-type refusal for an improper (or non-) list. Diverges on a cyclic list, like
+/// every M3/M4 list walk; cycle handling is an M9 conformance question.
+pub fn list_elements(heap: &Heap, op: &'static str, v: Value) -> Result<Vec<Value>, VmError> {
+    let mut elems = Vec::new();
+    let mut cur = v;
+    while !cur.is_null() {
+        let Some(p) = heap.get::<Pair>(cur) else {
+            return Err(wrong_type(heap, op, "a proper list", v));
+        };
+        elems.push(p.car);
+        cur = p.cdr;
+    }
+    Ok(elems)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

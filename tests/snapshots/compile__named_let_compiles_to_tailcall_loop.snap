@@ -1,0 +1,20 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=4 consts=0 upvals=0 protos=1
+0000  LOADIMM     r1, undefined
+0001  CLOSURE     r1, p0                ; loop
+0002  MOVE        r2, r1
+0003  LOADI       r3, 0
+0004  TAILCALL    r2, 2                 ; 1 arg
+
+; proto main.p0 (loop): nparams=1 has_rest=false window=4 consts=0 upvals=1 protos=0
+;   u0 <- parent local r1
+0000  LOADI       r2, 9
+0001  NUMEQ       r0, r2, 0             ; skip if (= r0 r2)
+0002  JMP         +1                    ; -> 0004
+0003  RETURN1     r0
+0004  GETUPVAL    r2, u0
+0005  ADDI        r3, r0, 1
+0006  TAILCALL    r2, 2                 ; 1 arg

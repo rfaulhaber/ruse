@@ -303,9 +303,9 @@ unsafe impl HeapObject for Bytevector {
 /// the prototype's constants reachable: `trace_fields` walks the whole prototype tree.
 ///
 /// `upvals` holds one value per entry in the prototype's descriptor table: the closure's
-/// view of each captured binding. In the settled M4 design these are [`UpvalueCell`]s
-/// (shared, so `set!` through one closure is visible through another); the open/closed
-/// upvalue mechanics live in the VM, not here.
+/// view of each captured binding, each an [`UpvalueCell`] (shared, so `set!` through one
+/// closure is visible through another). The open/closed upvalue mechanics live in the
+/// VM, not here.
 #[repr(C)]
 pub struct Closure {
     pub(crate) header: GcHeader,
@@ -354,13 +354,21 @@ unsafe impl HeapObject for Closure {
 
 /// The shared box a captured variable lives in.
 ///
-/// A closed upvalue holds the variable itself; several closures over the same binding share
-/// one cell, which is what makes `set!` on a captured variable visible to all of them.
+/// A cell is *open* while the frame that owns the variable is still live: the variable's
+/// storage is that frame's register, named here by `location` as an absolute index into
+/// the VM's flat register file (an index, not a pointer — the register file is a `Vec`
+/// that may reallocate). Closing the cell copies the register's value into `value` and
+/// clears `location`; from then on the cell itself is the storage. Several closures over
+/// the same binding share one cell, which is what makes `set!` on a captured variable
+/// visible to all of them, and reads/writes while open share storage with the owning
+/// frame for the same reason.
 #[repr(C)]
 pub struct UpvalueCell {
     pub(crate) header: GcHeader,
-    /// The captured binding.
+    /// The captured binding once closed; `undefined` (and unread) while open.
     pub value: Value,
+    /// While open, the absolute register-file index the variable lives at.
+    pub(crate) location: Option<usize>,
 }
 
 impl UpvalueCell {
@@ -368,6 +376,15 @@ impl UpvalueCell {
         Self {
             header: GcHeader::unlinked(HeapTag::UpvalueCell),
             value,
+            location: None,
+        }
+    }
+
+    pub(crate) fn new_open(location: usize) -> Self {
+        Self {
+            header: GcHeader::unlinked(HeapTag::UpvalueCell),
+            value: Value::UNDEFINED,
+            location: Some(location),
         }
     }
 }
@@ -379,7 +396,9 @@ impl Header for UpvalueCell {
 }
 
 // SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
-// the allocator writes into that header. `trace_fields` reports `value`, its only `Value` field.
+// the allocator writes into that header. `trace_fields` reports `value`, its only `Value`
+// field; while the cell is open, `value` is the immediate `undefined` and the variable
+// itself lives in a register the VM's root set traces.
 unsafe impl HeapObject for UpvalueCell {
     const TAG: HeapTag = HeapTag::UpvalueCell;
 

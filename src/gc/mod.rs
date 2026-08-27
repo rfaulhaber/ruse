@@ -196,6 +196,13 @@ impl Heap {
         self.alloc(UpvalueCell::new(value))
     }
 
+    /// Allocate an *open* upvalue cell whose variable lives at absolute register-file
+    /// index `location`. The caller (the VM) owns keeping the cell on its open list and
+    /// closing it before that register's frame exits.
+    pub(crate) fn open_upvalue_cell(&mut self, location: usize) -> Value {
+        self.alloc(UpvalueCell::new_open(location))
+    }
+
     /// Allocate a closure over `proto`, capturing `upvals` — exactly one value per entry
     /// in the prototype's descriptor table, in order. That arity is the invariant the
     /// verifier's `GETUPVAL`/`SETUPVAL` bounds checks stand on, so it is asserted in

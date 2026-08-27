@@ -132,6 +132,10 @@ pub fn install(prims: &mut PrimTable, heap: &mut Heap, globals: &mut Globals) {
         ("display", 1, Some(1), n_display),
         ("write", 1, Some(1), n_write),
         ("newline", 0, Some(0), n_newline),
+        // M4 additions, appended so earlier PRIMCALL indices stay put (the order is not
+        // frozen, but stable indices keep snapshot diffs about what actually changed).
+        ("append", 0, None, n_append),
+        ("list->vector", 1, Some(1), n_list_to_vector),
     ];
     for &(name, min, max, func) in defs {
         let index = prims.register(PrimDef {
@@ -278,6 +282,28 @@ fn n_set_cdr(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> 
 
 fn n_list(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
     Ok(rt::pairs::list(ctx.heap, args))
+}
+
+/// R7RS §6.4 `append`: every argument but the last must be a proper list and is copied;
+/// the last is shared as the result's tail, whatever it is.
+fn n_append(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    let Some((&last, front)) = args.split_last() else {
+        return Ok(Value::NIL);
+    };
+    let mut elems = Vec::new();
+    for &l in front {
+        elems.extend(rt::pairs::list_elements(ctx.heap, "append", l)?);
+    }
+    let mut acc = last;
+    for &e in elems.iter().rev() {
+        acc = ctx.heap.cons(e, acc);
+    }
+    Ok(acc)
+}
+
+fn n_list_to_vector(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    let elems = rt::pairs::list_elements(ctx.heap, "list->vector", arg(args, 0))?;
+    Ok(ctx.heap.vector(elems))
 }
 
 // ---------------------------------------------------------------- equivalence

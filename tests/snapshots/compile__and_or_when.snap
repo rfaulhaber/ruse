@@ -1,0 +1,28 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=4 consts=0 upvals=0 protos=0
+0000  LOADI       r1, 1
+0001  TEST        r1, 0                 ; skip if r1
+0002  JMP         +18                   ; -> 0021
+0003  LOADIMM     r2, #f
+0004  MOVE        r3, r2
+0005  TEST        r3, 0                 ; skip if r3
+0006  JMP         +2                    ; -> 0009
+0007  MOVE        r1, r2
+0008  JMP         +1                    ; -> 0010
+0009  LOADI       r1, 2
+0010  TEST        r1, 0                 ; skip if r1
+0011  JMP         +7                    ; -> 0019
+0012  LOADIMM     r1, #t
+0013  TEST        r1, 0                 ; skip if r1
+0014  JMP         +2                    ; -> 0017
+0015  LOADI       r0, 3
+0016  RETURN1     r0
+0017  LOADIMM     r0, unspecified
+0018  RETURN1     r0
+0019  LOADIMM     r0, #f
+0020  RETURN1     r0
+0021  LOADIMM     r0, #f
+0022  RETURN1     r0

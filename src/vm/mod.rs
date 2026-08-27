@@ -13,16 +13,27 @@
 //! each opcode live in [`crate::rt`] as standalone functions, per habit 2 of
 //! `docs/project_plan.org`: the arms here only decode operands and route.
 //!
-//! # The M3 slice
+//! # The M3–M4 slice
 //!
-//! Everything the M3 compiler can emit executes: data movement, fixnum-fast arithmetic,
-//! the skip-family comparisons, jumps, pairs and vectors, capture-free closures, global
-//! access, `CALL`/`TAILCALL`/`RETURN`/`RETURN1`, and `PRIMCALL`. `TAILCALL` reuses the
-//! current frame unconditionally — constant-space tail recursion is R7RS §3.5, not an
-//! optimization. Opcodes belonging to later milestones (upvalues, first-class control,
-//! open-ended argument/result counts, `DIV`'s exact rationals) return a typed
+//! Everything the compiler can emit executes: data movement, fixnum-fast arithmetic,
+//! the skip-family comparisons, jumps, pairs and vectors, closures with real captures,
+//! global access, `CALL`/`TAILCALL`/`RETURN`/`RETURN1`, and `PRIMCALL`. `TAILCALL`
+//! reuses the current frame unconditionally — constant-space tail recursion is R7RS
+//! §3.5, not an optimization. Opcodes belonging to later milestones (first-class
+//! control, open-ended argument/result counts, `DIV`'s exact rationals) return a typed
 //! [`VmErrorKind::Unimplemented`] instead of `unreachable!`, so a hand-assembled
 //! prototype degrades into a diagnostic rather than a crash.
+//!
+//! # Upvalues are cells, open then closed
+//!
+//! `CLOSURE` resolves its child's [`UpvalDesc`] table into
+//! [`UpvalueCell`](crate::value::object::UpvalueCell)s — Lua's design. A capture of a
+//! live register is an *open* cell naming that register (by absolute index, on
+//! [`VmState::open_upvals`]); reads and writes go through to the register, so the owning
+//! frame and every capturing closure share one storage location. The cell *closes* —
+//! the value moves into it — when the variable's extent ends: at an explicit
+//! `CLOSEUPVALS` or closing `JMP`, and unconditionally when the owning frame returns or
+//! is reused by `TAILCALL`.
 //!
 //! # Collection happens only at the safepoint
 //!
@@ -39,13 +50,14 @@ mod roots;
 use std::io::Write;
 use std::rc::Rc;
 
+use crate::bytecode::UpvalDesc;
 use crate::bytecode::{Insn, Op, Proto, verify};
 use crate::gc::Heap;
 use crate::rt;
 use crate::rt::prims::{NativeCtx, NativeFn, PrimDef, PrimTable};
 use crate::span::Span;
 use crate::value::Value;
-use crate::value::object::{Closure, NativeProc, Symbol};
+use crate::value::object::{Closure, NativeProc, Symbol, UpvalueCell};
 
 use error::{VmError, VmErrorKind};
 use globals::Globals;
@@ -81,6 +93,13 @@ pub(crate) struct Frame {
 pub(crate) struct VmState {
     pub(crate) regs: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
+    /// Every *open* upvalue cell, as `(absolute register index, cell value)`. An entry
+    /// exists from the `CLOSURE` that captured the register until something closes it —
+    /// `CLOSEUPVALS`, a closing `JMP`, or the owning frame's exit — at which point the
+    /// register's value moves into the cell and the entry is removed. The list is a GC
+    /// root: a cell may be reachable from nothing else once its closure dies, and closing
+    /// writes to it.
+    pub(crate) open_upvals: Vec<(usize, Value)>,
     pub(crate) globals: Globals,
     /// The previous top-level result, kept rooted so an embedder-held [`Value`] from the
     /// last execution survives the next one's collections.
@@ -138,6 +157,7 @@ impl Vm {
             state: VmState {
                 regs: Vec::new(),
                 frames: Vec::new(),
+                open_upvals: Vec::new(),
                 globals,
                 last_result: Value::UNSPECIFIED,
                 compiled: None,
@@ -317,7 +337,11 @@ impl Vm {
 
         let result = self.run();
         // Leave nothing behind either way: the next execute starts from a clean frame
-        // stack, and no register survives to be misreported by a future root walk.
+        // stack, and no register survives to be misreported by a future root walk. Open
+        // upvalues left by an error unwind are *closed*, not dropped — an escaped closure
+        // (say, stored in a global before the error) must see the values its registers
+        // held at unwind time, not whatever the next execution writes there.
+        self.close_upvals_from(0);
         self.state.frames.clear();
         self.state.regs.clear();
         if let Ok(v) = result {
@@ -470,9 +494,11 @@ impl Vm {
 
             // ------------------------------------------------------ control flow
             Op::Jmp => {
-                // `A > 0` also closes open upvalues from register A-1: with no open
-                // upvalue list until M4, there is never anything to close, so the close
-                // half is a correct no-op rather than an error.
+                // `A > 0` also closes open upvalues at and above register A-1 — the
+                // loop-exit close, Lua-style. `A = 0` closes nothing.
+                if a > 0 {
+                    self.close_upvals_from(base + a - 1);
+                }
                 self.jump(insn.sbx())?;
             }
             Op::ExtraArg => {
@@ -541,16 +567,60 @@ impl Vm {
                         None => return internal("unverified CLOSURE child index"),
                     }
                 };
-                if !child.upvals.is_empty() {
-                    return unimplemented_op("upvalue capture (CLOSURE)", "M4");
+                // Resolve each capture per the child's descriptor table: a parent local
+                // becomes (or joins) an open cell over that register; a parent upvalue is
+                // the running closure's own cell, shared. Cells and the closure are
+                // several allocations with no safepoint in between — allocation never
+                // collects, and the cells are rooted through the open list (and then the
+                // closure) before the next safepoint can run.
+                let mut upvals = Vec::with_capacity(child.upvals.len());
+                for i in 0..child.upvals.len() {
+                    let cell = match child.upvals[i] {
+                        UpvalDesc::ParentLocal(reg) => {
+                            self.find_or_open_cell(base + usize::from(reg))
+                        }
+                        UpvalDesc::ParentUpval(u) => self.upval_cell(usize::from(u))?,
+                    };
+                    upvals.push(cell);
                 }
-                let v = self.heap.closure(child, Vec::new());
+                let v = self.heap.closure(child, upvals);
                 self.set_reg(base + a, v);
             }
-            Op::GetUpval | Op::SetUpval => {
-                return unimplemented_op("upvalues (GETUPVAL/SETUPVAL)", "M4");
+            Op::GetUpval => {
+                let cell = self.upval_cell(b)?;
+                let v = match self.heap.get::<UpvalueCell>(cell) {
+                    Some(c) => match c.location {
+                        Some(abs) => self.reg(abs),
+                        None => c.value,
+                    },
+                    None => return internal("GETUPVAL through a non-cell"),
+                };
+                // The only way `undefined` reaches an upvalue is the letrec* black hole:
+                // a forward reference the compiler could not rule out statically.
+                if v.is_undefined() {
+                    return VmErrorKind::UninitializedVariable.err();
+                }
+                self.set_reg(base + a, v);
             }
-            Op::CloseUpvals => return unimplemented_op("upvalue closing (CLOSEUPVALS)", "M4"),
+            Op::SetUpval => {
+                let cell = self.upval_cell(b)?;
+                let v = self.reg(base + a);
+                let location = match self.heap.get::<UpvalueCell>(cell) {
+                    Some(c) => c.location,
+                    None => return internal("SETUPVAL through a non-cell"),
+                };
+                match location {
+                    // Open: the register is the shared storage.
+                    Some(abs) => self.set_reg(abs, v),
+                    None => {
+                        if let Some(c) = self.heap.get_mut::<UpvalueCell>(cell) {
+                            c.value = v;
+                        }
+                        self.heap.wb(cell, v);
+                    }
+                }
+            }
+            Op::CloseUpvals => self.close_upvals_from(base + a),
             Op::GetGlobal => {
                 let sym = self.global_key(usize::from(insn.bx()))?;
                 let bound = self
@@ -636,7 +706,7 @@ impl Vm {
                 }
                 self.check_scheme_arity(&proto, nargs)?;
                 let new_base = base + a + 1;
-                self.ensure_window(new_base, proto.max_window, nargs);
+                self.enter_window(&proto, new_base, nargs);
                 self.state.frames.push(Frame {
                     proto,
                     closure: callee,
@@ -673,13 +743,16 @@ impl Vm {
         match self.callee_kind(callee) {
             Callee::Closure(proto) => {
                 self.check_scheme_arity(&proto, nargs)?;
+                // This frame's extent ends here: any variable it still shares with a
+                // closure moves into its cell before the slide overwrites the register.
+                self.close_upvals_from(base);
                 // Slide the arguments down to the head of the reused window; source
                 // starts above destination, so a forward copy cannot clobber its input.
                 for i in 0..nargs {
                     let v = self.reg(base + a + 1 + i);
                     self.set_reg(base + i, v);
                 }
-                self.ensure_window(base, proto.max_window, nargs);
+                self.enter_window(&proto, base, nargs);
                 let Some(f) = self.state.frames.last_mut() else {
                     return internal("TAILCALL with no frame");
                 };
@@ -706,6 +779,11 @@ impl Vm {
         let Some(frame) = self.state.frames.pop() else {
             return internal("RETURN with no frame");
         };
+        // The frame's variables reach the end of their extent: close what its closures
+        // still share. The registers are untouched by the pop, so their values are here
+        // to copy. (The compiler also emits `CLOSEUPVALS` at non-tail scope exits; this
+        // is the frame-exit half, which covers tail paths without a trailing instruction.)
+        self.close_upvals_from(frame.base);
         if self.state.frames.is_empty() {
             return Ok(Flow::Done(v));
         }
@@ -728,21 +806,48 @@ impl Vm {
     }
 
     fn check_scheme_arity(&self, proto: &Proto, nargs: usize) -> Result<(), VmError> {
-        if proto.has_rest {
-            return unimplemented_res("rest arguments", "M4");
-        }
-        if nargs != usize::from(proto.nparams) {
+        let ok = if proto.has_rest {
+            nargs >= usize::from(proto.nparams)
+        } else {
+            nargs == usize::from(proto.nparams)
+        };
+        if !ok {
             return VmErrorKind::WrongArity {
                 name: proto
                     .name
                     .clone()
                     .unwrap_or_else(|| "#<procedure>".to_string()),
-                expected: proto.nparams.to_string(),
+                expected: if proto.has_rest {
+                    format!("at least {}", proto.nparams)
+                } else {
+                    proto.nparams.to_string()
+                },
                 got: nargs,
             }
             .err();
         }
         Ok(())
+    }
+
+    /// Set up a callee window at `base` whose arguments are already in place: collect a
+    /// rest list when the prototype takes one, size the register file, and clear the
+    /// non-argument remainder. Arity was checked, so `nargs >= nparams` under `has_rest`.
+    ///
+    /// The rest list is consed *before* the window is sized (pure reads plus allocation,
+    /// which never collects) and stored after, because with no extra arguments its
+    /// register sits above the argument block and may not exist yet. Extra-argument
+    /// registers above a smaller callee window go stale, which is harmless: they sit
+    /// inside the caller's still-traced window and are never read again.
+    fn enter_window(&mut self, proto: &Proto, base: usize, nargs: usize) {
+        if proto.has_rest {
+            let nparams = usize::from(proto.nparams);
+            let extras: Vec<Value> = (nparams..nargs).map(|i| self.reg(base + i)).collect();
+            let rest = rt::pairs::list(&mut self.heap, &extras);
+            self.ensure_window(base, proto.max_window, nparams);
+            self.set_reg(base + nparams, rest);
+        } else {
+            self.ensure_window(base, proto.max_window, nargs);
+        }
     }
 
     /// Run native `index` on the `nargs` values starting at absolute register
@@ -806,6 +911,57 @@ impl Vm {
         debug_assert!(i < self.state.regs.len(), "register write out of window");
         if let Some(slot) = self.state.regs.get_mut(i) {
             *slot = v;
+        }
+    }
+
+    // ---------------------------------------------------------------- upvalues
+
+    /// The open cell over absolute register `abs`, creating and listing one if no
+    /// closure has captured that register yet. Sharing the cell is what makes two
+    /// closures over one binding see each other's `set!`s.
+    fn find_or_open_cell(&mut self, abs: usize) -> Value {
+        if let Some(&(_, cell)) = self.state.open_upvals.iter().find(|&&(i, _)| i == abs) {
+            return cell;
+        }
+        let cell = self.heap.open_upvalue_cell(abs);
+        self.state.open_upvals.push((abs, cell));
+        cell
+    }
+
+    /// The running closure's upvalue cell at `index`. The verifier bounds-checked the
+    /// index against the prototype's descriptor table, and the allocator asserts a
+    /// closure captures exactly that many cells, so a miss here is a VM bug.
+    fn upval_cell(&self, index: usize) -> Result<Value, VmError> {
+        let Some(f) = self.state.frames.last() else {
+            return internal_res("upvalue access with no frame");
+        };
+        let Some(clos) = self.heap.get::<Closure>(f.closure) else {
+            return internal_res("upvalue access in a frame with no closure");
+        };
+        match clos.upvals.get(index) {
+            Some(&cell) => Ok(cell),
+            None => internal_res("upvalue index outran the closure's captures"),
+        }
+    }
+
+    /// Close every open upvalue at absolute register `floor` or above: copy the
+    /// register's value into the cell, mark it closed, and drop it from the open list.
+    /// Cheap when the list is empty, which is the common case on every return.
+    fn close_upvals_from(&mut self, floor: usize) {
+        let mut i = 0;
+        while i < self.state.open_upvals.len() {
+            let (abs, cell) = self.state.open_upvals[i];
+            if abs < floor {
+                i += 1;
+                continue;
+            }
+            let v = self.reg(abs);
+            if let Some(c) = self.heap.get_mut::<UpvalueCell>(cell) {
+                c.location = None;
+                c.value = v;
+            }
+            self.heap.wb(cell, v);
+            self.state.open_upvals.swap_remove(i);
         }
     }
 
@@ -898,10 +1054,6 @@ fn singleton(bx: u16) -> Option<Value> {
 }
 
 fn unimplemented_op(what: &'static str, milestone: &'static str) -> Result<Flow, VmError> {
-    Err(VmError::new(VmErrorKind::Unimplemented { what, milestone }))
-}
-
-fn unimplemented_res<T>(what: &'static str, milestone: &'static str) -> Result<T, VmError> {
     Err(VmError::new(VmErrorKind::Unimplemented { what, milestone }))
 }
 

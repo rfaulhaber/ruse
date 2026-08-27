@@ -1,0 +1,25 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=2 consts=1 upvals=0 protos=1
+0000  CLOSURE     r1, p0                ; h
+0001  SETGLOBAL   r1, k0                ; h
+0002  LOADIMM     r0, unspecified
+0003  RETURN1     r0
+
+; proto main.p0 (h): nparams=1 has_rest=false window=6 consts=0 upvals=0 protos=1
+0000  LOADIMM     r2, undefined
+0001  LOADIMM     r3, undefined
+0002  LOADI       r5, 2
+0003  MUL         r2, r0, r5
+0004  CLOSURE     r3, p0                ; helper
+0005  MOVE        r4, r3
+0006  LOADI       r5, 10
+0007  TAILCALL    r4, 2                 ; 1 arg
+
+; proto main.p0.p0 (helper): nparams=1 has_rest=false window=4 consts=0 upvals=1 protos=0
+;   u0 <- parent local r2
+0000  GETUPVAL    r3, u0
+0001  ADD         r1, r0, r3
+0002  RETURN1     r1

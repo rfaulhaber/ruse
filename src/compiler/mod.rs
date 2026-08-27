@@ -65,12 +65,14 @@ pub enum CompileError {
         #[label("here")]
         span: SourceSpan,
     },
-    #[error(
-        "`{name}` is a local of an enclosing function; capturing it arrives with closures in M4"
-    )]
-    CaptureUnsupported {
+    #[error("`{name}` is referenced before its letrec* initialization completes")]
+    #[diagnostic(help(
+        "a letrec/letrec* (or internal define) init may not read a binding whose own \
+         init has not run yet; wrap the reference in a lambda"
+    ))]
+    PrematureReference {
         name: String,
-        #[label("free variable here")]
+        #[label("read before initialization")]
         span: SourceSpan,
     },
     #[error("this function needs {needed} registers; a frame's window is capped at {max}")]

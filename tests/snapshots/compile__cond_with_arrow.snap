@@ -1,0 +1,19 @@
+---
+source: tests/compile.rs
+expression: "compile_text(&mut vm, src)"
+---
+; proto main: nparams=0 has_rest=false window=3 consts=3 upvals=0 protos=0
+0000  LOADI       r1, 1
+0001  LOADI       r2, 2
+0002  NUMEQ       r1, r2, 0             ; skip if (= r1 r2)
+0003  JMP         +2                    ; -> 0006
+0004  LOADK       r0, k0                ; no
+0005  RETURN1     r0
+0006  LOADK       r1, k1                ; #<pair>
+0007  MOVE        r2, r1
+0008  TEST        r2, 0                 ; skip if r2
+0009  JMP         +2                    ; -> 0012
+0010  CAR         r0, r1
+0011  RETURN1     r0
+0012  LOADK       r0, k2                ; else
+0013  RETURN1     r0

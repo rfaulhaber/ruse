@@ -12,12 +12,15 @@ use crate::gc::{Heap, Trace, Tracer};
 use super::VmState;
 
 // SAFETY: reports every `Value` the VM owns — each live frame's callee closure, its
-// prototype-tree constants, and its full register window, plus the global table, the
-// held last result, and the constants of the most recently compiled prototype. Windows
-// are complete root sets by construction: every register in `[base, base + max_window)`
-// was cleared to `undefined` at frame entry and only ever rewritten with live values.
-// Registers above the deepest live window are neither reported nor ever read again, so
-// stale words there are harmless.
+// prototype-tree constants, and its full register window, plus every open upvalue cell,
+// the global table, the held last result, and the constants of the most recently
+// compiled prototype. Windows are complete root sets by construction: every register in
+// `[base, base + max_window)` was cleared to `undefined` at frame entry and only ever
+// rewritten with live values. Registers above the deepest live window are neither
+// reported nor ever read again, so stale words there are harmless. Open cells must be
+// reported here because closing writes to them even after every closure that shared
+// them has died; the variable an open cell names lives in a register a frame walk
+// already reports.
 unsafe impl Trace for VmState {
     fn trace(&self, tracer: &mut Tracer<'_>) {
         for frame in &self.frames {
@@ -27,6 +30,9 @@ unsafe impl Trace for VmState {
             for &v in self.regs.get(frame.base..end).unwrap_or(&[]) {
                 tracer.mark(v);
             }
+        }
+        for &(_, cell) in &self.open_upvals {
+            tracer.mark(cell);
         }
         self.globals.trace_into(tracer);
         tracer.mark(self.last_result);

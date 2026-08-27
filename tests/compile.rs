@@ -41,6 +41,34 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("higher_order_heads_stay_calls", "((if #f + *) 3 4)"),
     ("nested_lambdas", "(lambda (x) (lambda (y) 7))"),
     ("set_global_probes_boundness", "(set! x 1)"),
+    // The spec §6.2 exit-criterion program: a capture descriptor on the child, GETUPVAL/
+    // SETUPVAL through the cell, and the let-scope close before the fall-through return.
+    (
+        "make_counter_closure",
+        "(define (make-counter) (let ((n 0)) (lambda () (set! n (+ n 1)) n)))",
+    ),
+    // A grandchild reaches the outer binding through the middle lambda's own upvalue:
+    // ParentLocal in the middle prototype, ParentUpval in the innermost.
+    (
+        "capture_through_two_levels",
+        "(lambda (x) (lambda () (lambda () x)))",
+    ),
+    ("variadic_rest_param", "(define (f a . rest) rest)"),
+    (
+        "internal_defines_are_letrec",
+        "(define (h x) (define y (* x 2)) (define (helper n) (+ n y)) (helper 10))",
+    ),
+    (
+        "named_let_compiles_to_tailcall_loop",
+        "(let loop ((i 0)) (if (= i 9) i (loop (+ i 1))))",
+    ),
+    (
+        "cond_with_arrow",
+        "(cond ((= 1 2) 'no) ('(7) => car) (else 'else))",
+    ),
+    ("case_dispatches_on_eqv", "(case 3 ((1 2) 'lo) ((3 4) 'hi))"),
+    ("and_or_when", "(and 1 (or #f 2) (when #t 3))"),
+    ("quasiquote_splice", "`(a ,x ,@(list 1 2))"),
 ];
 
 fn compile_text(vm: &mut Vm, src: &str) -> String {

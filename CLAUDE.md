@@ -75,17 +75,22 @@ Standard Cargo layout — sources live in `src/`:
 
 ### Current status
 
-The walking skeleton runs (M0–M3): source text goes reader → compiler → verifier →
-dispatch loop → value, end to end. The M3 language slice is fixed-arity `lambda` (no
-captures yet), top-level `define`, `if`, `quote`, `set!`, `begin`, `let`, and ~35 native
-primitives; `TAILCALL` reuses frames, so tail recursion runs in constant space (tested
-under a 50-frame limit), fixnum overflow promotes to bignums, and collections happen only
-at the dispatch loop's safepoint with the frame windows as the root set. Still to come:
-closures/upvalues and derived forms (M4), the numeric tower (M5), reader breadth (M6),
-first-class control (M7), hygienic macros and libraries (M8), stdlib/ports/conformance
-(M9). Opcodes owned by those milestones execute as typed `Unimplemented` errors, never
-`unreachable!`. The goal is a bytecode-compiled R7RS implementation targeting the
-register VM described in `ruse-bytecode-spec.md`.
+M0–M4 are done: source text goes reader → compiler → verifier → dispatch loop → value,
+end to end, with real closures. The language slice is `lambda` (fixed, rest-only and
+dotted parameter lists), `define` (top-level and internal-as-`letrec*`), `if`, `quote`,
+`quasiquote` with depth tracking, `set!` (locals, captures and globals), `begin`, the
+whole `let` family (`let`/`let*`/`letrec`/`letrec*`/named `let`/`do`/single-value
+`let-values`), `and`/`or`/`when`/`unless`/`cond`/`case`, and ~37 native primitives.
+Upvalues are Lua-style open→closed cells (`src/value/object.rs::UpvalueCell`, the VM's
+open list in `src/vm/mod.rs`); `TAILCALL` reuses frames *and* closes the reused frame's
+cells first, so tail recursion — named-`let` and `do` loops included — runs in constant
+space with per-iteration captures independent. Fixnum overflow promotes to bignums, and
+collections happen only at the dispatch loop's safepoint with the frame windows plus the
+open-upvalue list as the root set. Still to come: the numeric tower (M5), reader breadth
+(M6), first-class control and multiple values (M7), hygienic macros and libraries (M8),
+stdlib/ports/conformance (M9). Opcodes owned by those milestones execute as typed
+`Unimplemented` errors, never `unreachable!`. The goal is a bytecode-compiled R7RS
+implementation targeting the register VM described in `ruse-bytecode-spec.md`.
 
 ### Bytecode invariants (M2)
 
@@ -143,6 +148,24 @@ register VM described in `ruse-bytecode-spec.md`.
   Milestone-future opcodes return `Unimplemented`; a broken VM invariant returns
   `Internal` and says it is a ruse bug. No `unwrap`, no `unreachable!` — the lint wall
   makes this a build property.
+
+### Upvalue invariants (M4)
+
+- **An open upvalue names its register by absolute index, never by pointer** — the
+  register file is a `Vec` that reallocates. `UpvalueCell.location` is `Some(abs)` while
+  open; closing copies the register's value in and clears it. The VM's open list
+  (`VmState::open_upvals`) maps index → cell and **is part of the root set**: a cell must
+  outlive every closure sharing it, because closing writes to it.
+- **Every close point is covered**: explicit `CLOSEUPVALS`/closing `JMP` (emitted only
+  where a captured scope falls through non-tail), `RETURN`/`RETURN1` and `TAILCALL`
+  (before the argument slide) for frame exit, and `Vm::execute`'s teardown for error
+  unwinds. No open cell may ever survive its register's extent — that is the
+  use-after-free the design exists to prevent.
+- **`undefined` reaching `GETUPVAL` is the letrec\* black hole** and errors as
+  `UninitializedVariable`; the compiler statically rejects same-function forward
+  references (`PrematureReference`), so the runtime check only fires through captures.
+- **Rest arguments are call-entry metadata, not an opcode**: `CALL`/`TAILCALL` cons the
+  extras into a list placed in `R[nparams]` after the callee window is sized.
 
 ### Value and GC invariants (M1)
 

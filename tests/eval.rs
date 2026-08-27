@@ -299,32 +299,347 @@ fn runtime_errors_are_typed_and_carry_spans() {
 fn compile_errors_name_their_milestone() {
     let mut vm = vm();
 
-    let err = eval_err(&mut vm, "(let ((x 1)) (lambda (y) (+ x y)))");
-    assert!(matches!(
-        err,
-        RuseError::Compile(ruse::CompileError::CaptureUnsupported { .. })
-    ));
-
-    let err = eval_err(&mut vm, "(cond (#t 1))");
+    let err = eval_err(&mut vm, "(guard (e (#t 1)) 2)");
     assert!(matches!(
         err,
         RuseError::Compile(ruse::CompileError::Unsupported {
-            milestone: "M4",
+            milestone: "M7",
             ..
         })
     ));
 
-    let err = eval_err(&mut vm, "(lambda args args)");
+    let err = eval_err(&mut vm, "(define-syntax foo (syntax-rules () ((_) 1)))");
     assert!(matches!(
         err,
-        RuseError::Compile(ruse::CompileError::Unsupported { .. })
+        RuseError::Compile(ruse::CompileError::Unsupported {
+            milestone: "M8",
+            ..
+        })
     ));
 
-    let err = eval_err(&mut vm, "(define (f) (define x 1) x)");
+    // let-values formals that need a real multiple-value producer defer to M7.
+    let err = eval_err(&mut vm, "(let-values (((a b) (f))) a)");
     assert!(matches!(
         err,
-        RuseError::Compile(ruse::CompileError::Unsupported { .. })
+        RuseError::Compile(ruse::CompileError::Unsupported {
+            milestone: "M7",
+            ..
+        })
     ));
+}
+
+// ---------------------------------------------------------------- M4: closures
+
+/// The M4 exit criterion, spec §6.2: two counters from one maker mutate *independent*
+/// cells, and `set!` through the closure mutates the binding the closure shares with
+/// nothing else.
+#[test]
+fn make_counter_yields_independent_counters() {
+    let mut vm = vm();
+    eval(
+        &mut vm,
+        "(define (make-counter)
+           (let ((n 0))
+             (lambda () (set! n (+ n 1)) n)))
+         (define c1 (make-counter))
+         (define c2 (make-counter))",
+    );
+    assert_eq!(eval(&mut vm, "(c1)"), fix(1));
+    assert_eq!(eval(&mut vm, "(c1)"), fix(2));
+    assert_eq!(eval(&mut vm, "(c2)"), fix(1));
+    assert_eq!(eval(&mut vm, "(c1)"), fix(3));
+}
+
+/// Two closures over one binding share one cell: a `set!` through either is visible
+/// through the other, before and after the binding's frame has exited.
+#[test]
+fn closures_over_one_binding_share_the_mutation() {
+    let mut vm = vm();
+    eval(
+        &mut vm,
+        "(define p
+           (let ((n 0))
+             (cons (lambda () (set! n (+ n 1)) n)
+                   (lambda () n))))",
+    );
+    assert_eq!(eval(&mut vm, "((car p))"), fix(1));
+    assert_eq!(eval(&mut vm, "((car p))"), fix(2));
+    assert_eq!(eval(&mut vm, "((cdr p))"), fix(2));
+}
+
+/// A capture whose `let` scope exits mid-function must be closed before the register is
+/// reused — the CLOSEUPVALS-at-scope-exit path, as opposed to the frame-exit path.
+#[test]
+fn a_scope_exit_closes_the_cell_before_the_register_is_reused() {
+    let mut vm = vm();
+    let v = eval(
+        &mut vm,
+        "(define (trap)
+           (define c (let ((n 10)) (lambda () n)))
+           (let ((m 99)) (* m 2))
+           (c))
+         (trap)",
+    );
+    assert_eq!(v, fix(10));
+}
+
+/// Each iteration of a tail-recursive loop is a separate extent: closures made in
+/// different iterations capture different cells (TAILCALL closes before frame reuse).
+#[test]
+fn loop_iterations_capture_independent_cells() {
+    let mut vm = vm();
+    let v = eval(
+        &mut vm,
+        "(define fs
+           (let loop ((i 0) (acc '()))
+             (if (= i 3) acc (loop (+ i 1) (cons (lambda () i) acc)))))
+         (equal? (list ((car fs)) ((car (cdr fs))) ((car (cdr (cdr fs)))))
+                 '(2 1 0))",
+    );
+    assert_eq!(v, Value::TRUE);
+}
+
+/// Upvalue chains through more than one lambda level: the middle function passes the
+/// capture down as ParentUpval, not a re-capture of a dead register.
+#[test]
+fn nested_lambdas_capture_through_the_chain() {
+    let mut vm = vm();
+    let v = eval(
+        &mut vm,
+        "(define (outer x)
+           (lambda ()
+             (lambda () (* x 7))))
+         (((outer 6)))",
+    );
+    assert_eq!(v, fix(42));
+}
+
+// ---------------------------------------------------------------- M4: binding forms
+
+#[test]
+fn variadic_lambdas_collect_rest_arguments() {
+    let mut vm = vm();
+    assert_eq!(
+        eval(
+            &mut vm,
+            "(define (f . args) args) (equal? (f 1 2 3) '(1 2 3))"
+        ),
+        Value::TRUE
+    );
+    assert_eq!(eval(&mut vm, "((lambda args args) )"), Value::NIL);
+    assert_eq!(
+        eval(
+            &mut vm,
+            "(define (g a . rest) (cons a rest)) (equal? (g 1 2 3) '(1 2 3))"
+        ),
+        Value::TRUE
+    );
+    // Too few required arguments is a typed arity error naming the floor.
+    let err = eval_err(&mut vm, "(g)");
+    assert!(matches!(
+        vm_kind(&err),
+        VmErrorKind::WrongArity { got: 0, expected, .. } if expected == "at least 1"
+    ));
+}
+
+#[test]
+fn internal_defines_are_letrec_star() {
+    let mut vm = vm();
+    // Mutual recursion between internal defines.
+    let v = eval(
+        &mut vm,
+        "(define (classify n)
+           (define (even? n) (if (= n 0) #t (odd? (- n 1))))
+           (define (odd? n) (if (= n 0) #f (even? (- n 1))))
+           (if (even? n) 'even 'odd))
+         (classify 9)",
+    );
+    assert_eq!(v, eval(&mut vm, "'odd"));
+
+    // A same-body forward *value* reference is caught at compile time.
+    let err = eval_err(&mut vm, "(define (bad) (define a b) (define b 1) a) (bad)");
+    assert!(matches!(
+        err,
+        RuseError::Compile(ruse::CompileError::PrematureReference { .. })
+    ));
+
+    // One routed through a call is caught at run time by the black-hole check.
+    let err = eval_err(
+        &mut vm,
+        "(define (bad2)
+           (define f (lambda () g))
+           (define x (f))
+           (define g 1)
+           x)
+         (bad2)",
+    );
+    assert_eq!(vm_kind(&err), &VmErrorKind::UninitializedVariable);
+}
+
+#[test]
+fn the_let_family_cond_case_and_or_slice() {
+    let mut vm = vm();
+    assert_eq!(eval(&mut vm, "(let* ((x 2) (y (* x 3))) (+ x y))"), fix(8));
+    assert_eq!(
+        eval(
+            &mut vm,
+            "(letrec ((even? (lambda (n) (if (= n 0) #t (odd? (- n 1)))))
+                      (odd?  (lambda (n) (if (= n 0) #f (even? (- n 1))))))
+               (even? 88))"
+        ),
+        Value::TRUE
+    );
+    assert_eq!(
+        eval(&mut vm, "(letrec* ((a 2) (b (* a 5))) (+ a b))"),
+        fix(12)
+    );
+    assert_eq!(
+        eval(
+            &mut vm,
+            "(let loop ((i 0) (acc 0)) (if (= i 5) acc (loop (+ i 1) (+ acc i))))"
+        ),
+        fix(10)
+    );
+    assert_eq!(
+        eval(&mut vm, "(do ((i 0 (+ i 1)) (s 0 (+ s i))) ((= i 5) s))"),
+        fix(10)
+    );
+    assert_eq!(eval(&mut vm, "(and 1 2 3)"), fix(3));
+    assert_eq!(eval(&mut vm, "(and 1 #f 3)"), Value::FALSE);
+    assert_eq!(eval(&mut vm, "(and)"), Value::TRUE);
+    assert_eq!(eval(&mut vm, "(or #f 7 9)"), fix(7));
+    assert_eq!(eval(&mut vm, "(or)"), Value::FALSE);
+    assert_eq!(eval(&mut vm, "(when (= 1 1) 'a 'b)"), eval(&mut vm, "'b"));
+    assert!(eval(&mut vm, "(unless (= 1 1) 'x)").is_unspecified());
+    assert_eq!(eval(&mut vm, "(unless (= 1 2) 'x)"), eval(&mut vm, "'x"));
+    // cond: plain, arrow, test-only and else clauses.
+    assert_eq!(
+        eval(&mut vm, "(cond ((= 1 2) 'no) ((= 1 1) 'yes) (else 'else))"),
+        eval(&mut vm, "'yes")
+    );
+    assert_eq!(
+        eval(&mut vm, "(cond ((= 1 2) 'no) (else 'else))"),
+        eval(&mut vm, "'else")
+    );
+    assert_eq!(eval(&mut vm, "(cond (#f 'no) ('(7 8) => car))"), fix(7));
+    assert_eq!(eval(&mut vm, "(cond (42))"), fix(42));
+    assert!(eval(&mut vm, "(cond (#f 1))").is_unspecified());
+    // case: eqv? dispatch, else, and both => forms.
+    assert_eq!(
+        eval(
+            &mut vm,
+            "(case (* 2 3) ((2 3 5 7) 'prime) ((1 4 6 8 9) 'composite) (else 'other))"
+        ),
+        eval(&mut vm, "'composite")
+    );
+    assert_eq!(
+        eval(
+            &mut vm,
+            "(case 9 ((1) 'one) (else => (lambda (k) (+ k 1))))"
+        ),
+        fix(10)
+    );
+    assert_eq!(
+        eval(&mut vm, "(let-values (((a) 1) ((b) 2)) (+ a b))"),
+        fix(3)
+    );
+    assert_eq!(
+        eval(&mut vm, "(let*-values (((a) 1) ((b) (+ a 1))) (+ a b))"),
+        fix(3)
+    );
+    assert_eq!(eval(&mut vm, "(define-values (dv) 11) dv"), fix(11));
+}
+
+#[test]
+fn quasiquote_builds_structure_with_depth_tracking() {
+    let mut vm = vm();
+    eval(&mut vm, "(define x 5)");
+    assert_eq!(
+        eval(&mut vm, "(equal? `(a ,x ,@(list 1 2)) '(a 5 1 2))"),
+        Value::TRUE
+    );
+    // A constant subtree stays a constant datum.
+    assert_eq!(eval(&mut vm, "(equal? `(a b (c)) '(a b (c)))"), Value::TRUE);
+    // Improper tails and unquoted tails.
+    assert_eq!(eval(&mut vm, "(equal? `(1 . ,x) (cons 1 5))"), Value::TRUE);
+    // R7RS §4.2.8 nesting: only level-1 unquotes evaluate.
+    assert_eq!(
+        eval(
+            &mut vm,
+            "(equal? `(1 `(2 ,(3 ,x))) '(1 (quasiquote (2 (unquote (3 5))))))"
+        ),
+        Value::TRUE
+    );
+    // The longhand spellings behave like the sugar.
+    assert_eq!(
+        eval(&mut vm, "(equal? (quasiquote (a (unquote x))) '(a 5))"),
+        Value::TRUE
+    );
+}
+
+/// Deep recursion through named let and do runs in constant frame space — the loops
+/// lower to TAILCALLs of the letrec-bound lambda.
+#[test]
+fn derived_loops_are_tail_recursive() {
+    let mut vm = vm();
+    vm.set_frame_limit(50);
+    assert_eq!(
+        eval(
+            &mut vm,
+            "(let loop ((i 0)) (if (= i 100000) 'done (loop (+ i 1))))"
+        ),
+        eval(&mut vm, "'done")
+    );
+    assert_eq!(
+        eval(&mut vm, "(do ((i 0 (+ i 1))) ((= i 100000) 'done))"),
+        eval(&mut vm, "'done")
+    );
+}
+
+/// Safepoint collections with open upvalues on the list and closures in flight: a hole
+/// in tracing the open list or the cells is a use-after-free this makes loud.
+#[test]
+fn collections_preserve_captured_bindings() {
+    let mut vm = vm();
+    let v = eval(
+        &mut vm,
+        "(define (churn n)
+           (let loop ((i 0) (fs '()))
+             (if (= i n)
+                 fs
+                 (loop (+ i 1) (cons (let ((v (list i i i))) (lambda () (car v))) fs)))))
+         (define fs (churn 30000))
+         ((car fs))",
+    );
+    assert_eq!(v, fix(29_999));
+    assert!(vm.heap().collections() > 0, "the churn must have collected");
+}
+
+/// A closure that escapes (into a global) before its frame dies by *error* must keep
+/// the values its registers held at unwind time: `Vm::execute`'s teardown closes every
+/// remaining open upvalue rather than dropping the list.
+#[test]
+fn an_error_unwind_closes_escaped_captures() {
+    let mut vm = vm();
+    eval(
+        &mut vm,
+        "(define keep #f)
+         (define (boom)
+           (let ((n 42))
+             (set! keep (lambda () n))
+             (car 5)))",
+    );
+    let err = eval_err(&mut vm, "(boom)");
+    assert!(matches!(
+        vm_kind(&err),
+        VmErrorKind::WrongType { op: "car", .. }
+    ));
+    // A later execution reuses the register file; the closed cell must not care.
+    eval(
+        &mut vm,
+        "(define (burn n) (if (= n 0) 0 (burn (- n 1)))) (burn 1000)",
+    );
+    assert_eq!(eval(&mut vm, "(keep)"), fix(42));
 }
 
 #[test]
