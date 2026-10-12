@@ -9,6 +9,7 @@
 
 mod arith;
 mod integer;
+mod parse;
 
 use std::cmp::Ordering;
 
