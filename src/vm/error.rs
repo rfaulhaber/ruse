@@ -58,6 +58,19 @@ pub enum VmErrorKind {
         expected: &'static str,
         got: &'static str,
     },
+    /// An exact zero divisor reached `/`, `quotient`, `remainder`, `modulo` or one of their
+    /// relatives. A flonum zero divides the IEEE way and never lands here.
+    #[error("{op}: division by zero")]
+    DivisionByZero { op: &'static str },
+    /// A numeric operation received numbers it still has no answer for: a non-integer
+    /// where an integer is required, a complex number where a real is, an infinity or NaN
+    /// with no exact counterpart. `detail` is
+    /// [`NumError::detail`](crate::num::NumError::detail).
+    #[error("{op}: {detail}")]
+    NumericDomain {
+        op: &'static str,
+        detail: &'static str,
+    },
     #[error("cannot call a {got} as a procedure")]
     NotCallable { got: &'static str },
     #[error("{name}: expected {expected} argument(s), got {got}")]
@@ -137,6 +150,14 @@ mod tests {
         });
         assert_eq!(e.to_string(), "unbound variable `frobnicate`");
         assert_eq!(e.span, None);
+
+        let e = VmError::new(VmErrorKind::DivisionByZero { op: "/" });
+        assert_eq!(e.to_string(), "/: division by zero");
+        let e = VmError::new(VmErrorKind::NumericDomain {
+            op: "exact",
+            detail: "no exact representation",
+        });
+        assert_eq!(e.to_string(), "exact: no exact representation");
     }
 
     #[test]

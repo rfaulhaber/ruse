@@ -453,8 +453,16 @@ impl Vm {
                 let v = rt::arith::mul(&mut self.heap, x, y)?;
                 self.set_reg(base + a, v);
             }
-            Op::Div => return unimplemented_op("exact division (DIV)", "M5"),
-            Op::Quot => return unimplemented_op("integer division (QUOT)", "M5"),
+            Op::Div => {
+                let (x, y) = (self.reg(base + b), self.reg(base + c));
+                let v = rt::arith::div(&mut self.heap, x, y)?;
+                self.set_reg(base + a, v);
+            }
+            Op::Quot => {
+                let (x, y) = (self.reg(base + b), self.reg(base + c));
+                let v = rt::arith::quot(&mut self.heap, x, y)?;
+                self.set_reg(base + a, v);
+            }
             Op::Neg => {
                 let x = self.reg(base + b);
                 let v = rt::arith::neg(&mut self.heap, x)?;
@@ -1120,6 +1128,38 @@ mod tests {
         let mut vm = quiet_vm();
         let v = vm.execute(main).unwrap();
         assert_eq!(v.as_fixnum(), Some(42));
+    }
+
+    #[test]
+    fn div_and_quot_dispatch_to_the_runtime() {
+        let run = |op: Op, x: i16, y: i16| {
+            let proto = Rc::new(Proto {
+                code: vec![
+                    Insn::iasbx(Op::LoadI, 0, x),
+                    Insn::iasbx(Op::LoadI, 1, y),
+                    Insn::iabc(op, 2, 0, 1),
+                    Insn::iabc(Op::Return1, 2, 0, 0),
+                ],
+                max_window: 3,
+                ..Proto::default()
+            });
+            let mut vm = quiet_vm();
+            let result = vm.execute(proto);
+            result.map(|v| rt::arith::unbox(&vm.heap, v))
+        };
+
+        assert_eq!(
+            run(Op::Div, 1, 3).unwrap(),
+            Some(crate::num::Num::rational(1.into(), 3.into()).unwrap())
+        );
+        assert_eq!(
+            run(Op::Quot, -13, 4).unwrap(),
+            Some(crate::num::Num::int(-3))
+        );
+        assert_eq!(
+            run(Op::Quot, 5, 0).unwrap_err().kind,
+            VmErrorKind::DivisionByZero { op: "quotient" }
+        );
     }
 
     #[test]
