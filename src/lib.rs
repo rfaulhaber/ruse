@@ -86,7 +86,7 @@ mod tests {
         let exprs = Parser::parse_from_str(input).unwrap();
 
         assert_eq!(exprs.len(), 4);
-        assert!(matches!(exprs[0], Expr::Integer(42, _)));
+        assert!(matches!(&exprs[0], Expr::Number(n, _) if n == &num::Num::int(42)));
         assert!(matches!(exprs[1], Expr::Quote(_, _)));
         assert!(matches!(exprs[2], Expr::List(_, _)));
         assert!(matches!(exprs[3], Expr::Boolean(true, _)));

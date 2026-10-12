@@ -187,11 +187,9 @@ impl Lowerer {
     /// consumed by [`Lowerer::body_ir`] before this ever sees them.
     fn form(&mut self, expr: &Expr, top: bool) -> Result<Ir, CompileError> {
         match expr {
-            Expr::Integer(..)
-            | Expr::Number(..)
-            | Expr::String(..)
-            | Expr::Character(..)
-            | Expr::Boolean(..) => Ok(Ir::Datum(expr.clone())),
+            Expr::Number(..) | Expr::String(..) | Expr::Character(..) | Expr::Boolean(..) => {
+                Ok(Ir::Datum(expr.clone()))
+            }
             Expr::Symbol(name, span) => Ok(Ir::Var(name.clone(), *span)),
             Expr::Quote(inner, _) => Ok(Ir::Datum((**inner).clone())),
             Expr::Quasiquote(inner, _) => self.quasi(inner, 1),

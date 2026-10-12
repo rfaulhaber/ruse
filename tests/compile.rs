@@ -69,6 +69,10 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("case_dispatches_on_eqv", "(case 3 ((1 2) 'lo) ((3 4) 'hi))"),
     ("and_or_when", "(and 1 (or #f 2) (when #t 3))"),
     ("quasiquote_splice", "`(a ,x ,@(list 1 2))"),
+    (
+        "rational_and_complex_constants",
+        "(list 1/3 1+2i 1e21 #x-10)",
+    ),
 ];
 
 fn compile_text(vm: &mut Vm, src: &str) -> String {

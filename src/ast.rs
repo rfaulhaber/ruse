@@ -1,11 +1,11 @@
+use crate::num::Num;
 use crate::span::Span;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     // Atoms
-    Number(f64, Span),
-    Integer(i64, Span),
+    Number(Num, Span),
     String(String, Span),
     Character(char, Span),
     Boolean(bool, Span),
@@ -34,7 +34,6 @@ impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Expr::Number(_, span) => *span,
-            Expr::Integer(_, span) => *span,
             Expr::String(_, span) => *span,
             Expr::Character(_, span) => *span,
             Expr::Boolean(_, span) => *span,
@@ -142,7 +141,6 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Number(n, _) => write!(f, "{}", n),
-            Expr::Integer(i, _) => write!(f, "{}", i),
             Expr::String(s, _) => write!(f, "\"{}\"", s),
             Expr::Character(c, _) => match *c {
                 ' ' => write!(f, "#\\space"),

@@ -47,6 +47,12 @@ fn eval(vm: &mut Vm, src: &str) -> Value {
     }
 }
 
+/// Evaluate and print with `write`, so a test can assert on the R7RS spelling of a value.
+fn show(vm: &mut Vm, src: &str) -> String {
+    let v = eval(vm, src);
+    ruse::rt::write::value_to_string(vm.heap(), v, ruse::rt::write::Style::Write)
+}
+
 fn eval_err(vm: &mut Vm, src: &str) -> RuseError {
     match vm.eval_str(src) {
         Ok(v) => panic!("eval of {src:?} unexpectedly produced {v:?}"),
@@ -677,4 +683,26 @@ fn collections_during_execution_preserve_live_registers() {
     );
     assert_eq!(v, fix(200_000));
     assert!(vm.heap().collections() > 0, "the safepoint must have fired");
+}
+
+#[test]
+fn numeric_literals_read_compute_and_print() {
+    let mut vm = vm();
+    assert_eq!(show(&mut vm, "1/3"), "1/3");
+    assert_eq!(show(&mut vm, "(+ 1/3 2/3)"), "1");
+    assert_eq!(show(&mut vm, "#x10"), "16");
+    assert_eq!(show(&mut vm, "#e1.5"), "3/2");
+    assert_eq!(show(&mut vm, "+inf.0"), "+inf.0");
+    assert_eq!(show(&mut vm, "(* 1+2i 1-2i)"), "5");
+    assert_eq!(show(&mut vm, "'(1/2 +i)"), "(1/2 +i)");
+    assert_eq!(
+        show(&mut vm, "(+ 123456789012345678901234567890 1)"),
+        "123456789012345678901234567891"
+    );
+    assert_eq!(
+        eval(&mut vm, "(- 1e400 1e400)")
+            .as_flonum()
+            .map(f64::is_nan),
+        Some(true)
+    );
 }

@@ -20,9 +20,12 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use num_traits::ToPrimitive;
+
 use crate::ast::Expr;
 use crate::bytecode::{Insn, Op, Proto, UpvalDesc};
 use crate::gc::Heap;
+use crate::num::Num;
 use crate::rt::prims::PrimTable;
 use crate::span::Span;
 use crate::value::Value;
@@ -362,8 +365,7 @@ impl Compiler<'_> {
     /// reader's own nesting depth, which the parser already recursed to build.
     fn datum_value(&mut self, expr: &Expr) -> Result<Value, CompileError> {
         Ok(match expr {
-            Expr::Integer(n, _) => self.heap.integer(*n),
-            Expr::Number(x, _) => Value::flonum(*x),
+            Expr::Number(n, _) => self.heap.number(n.clone()),
             Expr::String(s, _) => self.heap.string(s.clone()),
             Expr::Character(c, _) => Value::char(*c),
             Expr::Boolean(b, _) => Value::boolean(*b),
@@ -1064,7 +1066,7 @@ fn singleton_ordinal(v: Value) -> Option<u16> {
 /// A literal integer that fits `ADDI`'s signed byte.
 fn addi_immediate(ir: &Ir) -> Option<i8> {
     match ir {
-        Ir::Datum(Expr::Integer(n, _)) => i8::try_from(*n).ok(),
+        Ir::Datum(Expr::Number(Num::Int(i), _)) => i.to_i8(),
         _ => None,
     }
 }

@@ -1,3 +1,4 @@
+use crate::num::Num;
 use crate::span::{SourceFile, Span};
 use miette::{Diagnostic, SourceSpan};
 use std::collections::HashMap;
@@ -21,8 +22,7 @@ pub enum TokenKind {
     RightBracket,
 
     // Literals
-    Number(f64),
-    Integer(i64),
+    Number(Num),
     String(String),
     Character(char),
     Boolean(bool),
@@ -130,7 +130,7 @@ impl Lexer {
             '`' => TokenKind::Quasiquote,
             '.' => {
                 if self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                    return self.number_starting_with_dot();
+                    return self.number_or_identifier(self.position - 1);
                 }
                 // A `.` followed by identifier characters is a peculiar identifier
                 // (e.g. the `...` ellipsis used by syntax-rules); a lone `.` is the
@@ -153,10 +153,15 @@ impl Lexer {
             }
             '"' => return self.string(),
             '#' => return self.hash_syntax(),
+            // A sign starts a number when a digit or one of the `.`, `i`, `n` that open
+            // `.5`, `+i` and `+nan.0` follows; otherwise it is a peculiar identifier.
             _ if c.is_ascii_digit()
-                || ((c == '-' || c == '+') && self.peek().is_some_and(|p| p.is_ascii_digit())) =>
+                || ((c == '-' || c == '+')
+                    && self
+                        .peek()
+                        .is_some_and(|p| p.is_ascii_digit() || ".iInN".contains(p))) =>
             {
-                return self.number();
+                return self.number_or_identifier(self.position - 1);
             }
             _ if self.is_identifier_start(c) => return self.identifier(),
             _ => {
@@ -285,86 +290,45 @@ impl Lexer {
         })
     }
 
-    fn number(&mut self) -> Result<Token, LexError> {
+    /// Lexes a run that starts like a number. Numeric syntax is too context-dependent to
+    /// scan character by character (`1/3`, `+inf.0`, `1e2+3i`, `#x-ff`), so the run is cut
+    /// at the next delimiter and classified whole: a number, else a peculiar identifier
+    /// such as `+soup+`, else a malformed number.
+    fn number_or_identifier(&mut self, start_pos: usize) -> Result<Token, LexError> {
         let start_line = self.line;
         let start_column = self.column - 1;
-        let start_pos = self.position - 1;
 
-        // Consume digits (a leading sign was already consumed by the caller)
-        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+        while self.peek().is_some_and(|c| !self.is_delimiter(c)) {
             self.advance();
         }
 
-        let mut is_float = false;
+        let text = self.source.content[start_pos..self.position].to_string();
+        let span = Span::new(start_pos, self.position);
 
-        // Handle decimal point
-        if self.peek() == Some('.') {
-            is_float = true;
-            self.advance();
-            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                self.advance();
-            }
+        if let Some(n) = Num::parse(&text, 10) {
+            return Ok(Token {
+                kind: TokenKind::Number(n),
+                lexeme: text,
+                span,
+                line: start_line,
+                column: start_column,
+            });
         }
 
-        // Handle scientific notation
-        if matches!(self.peek(), Some('e') | Some('E')) {
-            is_float = true;
-            self.advance();
-            if matches!(self.peek(), Some('+') | Some('-')) {
-                self.advance();
-            }
-            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                self.advance();
-            }
+        if self.is_identifier(&text) {
+            let interned = self.intern_string(&text);
+            return Ok(Token {
+                kind: TokenKind::Identifier(interned.clone()),
+                lexeme: interned,
+                span,
+                line: start_line,
+                column: start_column,
+            });
         }
 
-        let lexeme = &self.source.content[start_pos..self.position];
-
-        let kind = if is_float {
-            let value = lexeme.parse::<f64>().map_err(|_| LexError::InvalidNumber {
-                number: lexeme.to_string(),
-                span: SourceSpan::new(start_pos.into(), self.position - start_pos),
-            })?;
-            TokenKind::Number(value)
-        } else {
-            let value = lexeme.parse::<i64>().map_err(|_| LexError::InvalidNumber {
-                number: lexeme.to_string(),
-                span: SourceSpan::new(start_pos.into(), self.position - start_pos),
-            })?;
-            TokenKind::Integer(value)
-        };
-
-        Ok(Token {
-            kind,
-            lexeme: lexeme.to_string(),
-            span: Span::new(start_pos, self.position),
-            line: start_line,
-            column: start_column,
-        })
-    }
-
-    fn number_starting_with_dot(&mut self) -> Result<Token, LexError> {
-        let start_line = self.line;
-        let start_column = self.column - 1;
-        let start_pos = self.position - 1;
-
-        // Consume digits after dot
-        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-            self.advance();
-        }
-
-        let lexeme = &self.source.content[start_pos..self.position];
-        let value = lexeme.parse::<f64>().map_err(|_| LexError::InvalidNumber {
-            number: lexeme.to_string(),
+        Err(LexError::InvalidNumber {
+            number: text,
             span: SourceSpan::new(start_pos.into(), self.position - start_pos),
-        })?;
-
-        Ok(Token {
-            kind: TokenKind::Number(value),
-            lexeme: lexeme.to_string(),
-            span: Span::new(start_pos, self.position),
-            line: start_line,
-            column: start_column,
         })
     }
 
@@ -421,6 +385,8 @@ impl Lexer {
                 self.advance(); // consume backslash
                 self.character()
             }
+            // Radix and exactness prefixes; the `#` is part of the number's text.
+            Some(c) if "xXbBoOdDeEiI".contains(c) => self.number_or_identifier(self.position - 1),
             Some(c) => Err(LexError::InvalidHashSyntax {
                 character: c,
                 span: SourceSpan::new((self.position - 1).into(), 2),
@@ -491,6 +457,20 @@ impl Lexer {
         self.is_identifier_start(c) || c.is_ascii_digit()
     }
 
+    /// Whether `text` is shaped like an identifier. A leading digit is excluded so that a
+    /// malformed number such as `12abc` is reported rather than read as a symbol.
+    fn is_identifier(&self, text: &str) -> bool {
+        let mut chars = text.chars();
+        chars
+            .next()
+            .is_some_and(|c| !c.is_ascii_digit() && self.is_identifier_start(c))
+            && chars.all(|c| self.is_identifier_subsequent(c))
+    }
+
+    fn is_delimiter(&self, c: char) -> bool {
+        c.is_whitespace() || "()[]\";|".contains(c)
+    }
+
     fn intern_string(&mut self, s: &str) -> String {
         // Check if we've seen this string before
         if let Some(interned) = self.intern_cache.get(s) {
@@ -554,7 +534,9 @@ pub enum LexError {
     },
 
     #[error("Invalid number literal '{number}'")]
-    #[diagnostic(help("Check the number format - only decimal integers and floats are supported"))]
+    #[diagnostic(help(
+        "Numbers may carry #x/#o/#b/#d and #e/#i prefixes and take the form of integers, rationals (1/3), decimals with exponents (1.5e3), +inf.0, +nan.0, or rectangular complexes (1+2i)"
+    ))]
     InvalidNumber {
         number: String,
         #[label("invalid number here")]
@@ -592,7 +574,23 @@ impl LexError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::num::Num;
     use miette::SourceSpan;
+
+    fn lex_kinds(input: &str) -> Vec<TokenKind> {
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize().unwrap();
+        tokens
+            .into_iter()
+            .map(|t| t.kind)
+            .filter(|k| *k != TokenKind::Eof)
+            .collect()
+    }
+
+    fn lex_err(input: &str) -> LexError {
+        let mut lexer = Lexer::new(input);
+        lexer.tokenize().unwrap_err()
+    }
 
     #[test]
     fn test_lexer_basic_tokens() {
@@ -609,13 +607,89 @@ mod tests {
 
     #[test]
     fn test_lexer_numbers() {
-        let mut lexer = Lexer::new("42 3.14 -17 .5");
+        let kinds = lex_kinds("42 3.14 -17 .5 1/3 #x-10 +inf.0 1+2i #e1.5 .5e3 -i");
+        let n = |s: &str| TokenKind::Number(Num::parse(s, 10).unwrap());
+        assert_eq!(
+            kinds,
+            vec![
+                n("42"),
+                n("3.14"),
+                n("-17"),
+                n(".5"),
+                n("1/3"),
+                n("#x-10"),
+                n("+inf.0"),
+                n("1+2i"),
+                n("#e1.5"),
+                n(".5e3"),
+                n("-i")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lexer_positive_signed_numbers() {
+        let kinds = lex_kinds("+5 +1.5 (+ 1 2)");
+
+        // `+5` / `+1.5` lex as numbers, not symbols...
+        assert_eq!(kinds[0], TokenKind::Number(Num::int(5)));
+        assert_eq!(kinds[1], TokenKind::Number(Num::flo(1.5)));
+        // ...but a bare `+` (not followed by a digit) is still the addition identifier.
+        assert_eq!(kinds[2], TokenKind::LeftParen);
+        assert!(matches!(kinds[3], TokenKind::Identifier(ref s) if s == "+"));
+    }
+
+    #[test]
+    fn numbers_win_over_peculiar_identifiers_and_delimit_correctly() {
+        let kinds = lex_kinds("(+ - ... ->x +soup+ -in i 1/2)[2]");
+        // + - ... ->x +soup+ -in i are identifiers; 1/2 and 2 are numbers; brackets delimit.
+        assert!(matches!(kinds[1], TokenKind::Identifier(ref s) if s == "+"));
+        assert!(matches!(kinds[6], TokenKind::Identifier(ref s) if s == "-in"));
+        assert!(matches!(kinds[8], TokenKind::Number(_)));
+        assert!(matches!(kinds[10], TokenKind::LeftBracket));
+        assert!(matches!(kinds[11], TokenKind::Number(_)));
+    }
+
+    #[test]
+    fn malformed_numbers_are_one_error() {
+        for src in [
+            "1+",
+            "1x",
+            "12abc",
+            "1/0",
+            "#x1.5",
+            "#e1e999999999",
+            "1_0",
+            "9223372036854775808x",
+        ] {
+            assert!(
+                matches!(lex_err(src), LexError::InvalidNumber { .. }),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn number_tokens_carry_the_whole_run_as_lexeme_and_span() {
+        let mut lexer = Lexer::new("(f #x-10 1/3)");
         let tokens = lexer.tokenize().unwrap();
 
-        assert!(matches!(tokens[0].kind, TokenKind::Integer(42)));
-        assert!(matches!(tokens[1].kind, TokenKind::Number(n) if (n - 3.14).abs() < f64::EPSILON));
-        assert!(matches!(tokens[2].kind, TokenKind::Integer(-17)));
-        assert!(matches!(tokens[3].kind, TokenKind::Number(n) if (n - 0.5).abs() < f64::EPSILON));
+        assert_eq!(tokens[2].lexeme, "#x-10");
+        assert_eq!(tokens[2].span, Span::new(3, 8));
+        assert_eq!(tokens[2].column, 4);
+        assert_eq!(tokens[3].lexeme, "1/3");
+        assert_eq!(tokens[3].span, Span::new(9, 12));
+
+        let err = lex_err("(f 12abc)");
+        assert_eq!(err.span(), SourceSpan::new(3.into(), 5));
+    }
+
+    #[test]
+    fn hash_forms_other_than_numbers_are_still_rejected() {
+        assert!(matches!(
+            lex_err("#z"),
+            LexError::InvalidHashSyntax { character: 'z', .. }
+        ));
     }
 
     #[test]
@@ -665,8 +739,8 @@ mod tests {
         let mut lexer = Lexer::new("; this is a comment\n42 ; another comment\n");
         let tokens = lexer.tokenize().unwrap();
 
-        assert_eq!(tokens.len(), 2); // integer + EOF
-        assert!(matches!(tokens[0].kind, TokenKind::Integer(42)));
+        assert_eq!(tokens.len(), 2); // number + EOF
+        assert_eq!(tokens[0].kind, TokenKind::Number(Num::int(42)));
         assert_eq!(tokens[1].kind, TokenKind::Eof);
     }
 
@@ -715,20 +789,6 @@ mod tests {
         assert!(matches!(tokens[1].kind, TokenKind::Character('\t')));
         assert!(matches!(tokens[2].kind, TokenKind::Character(' ')));
         assert!(matches!(tokens[3].kind, TokenKind::Character('x')));
-    }
-
-    #[test]
-    fn test_lexer_positive_signed_numbers() {
-        let mut lexer = Lexer::new("+5 +1.5 -7 (+ 1 2)");
-        let tokens = lexer.tokenize().unwrap();
-
-        // `+5` / `+1.5` lex as numbers, not symbols...
-        assert!(matches!(tokens[0].kind, TokenKind::Integer(5)));
-        assert!(matches!(tokens[1].kind, TokenKind::Number(n) if (n - 1.5).abs() < f64::EPSILON));
-        assert!(matches!(tokens[2].kind, TokenKind::Integer(-7)));
-        // ...but a bare `+` (not followed by a digit) is still the addition identifier.
-        assert_eq!(tokens[3].kind, TokenKind::LeftParen);
-        assert!(matches!(tokens[4].kind, TokenKind::Identifier(ref s) if s == "+"));
     }
 
     #[test]

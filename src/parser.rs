@@ -71,7 +71,6 @@ impl Parser {
                 | TokenKind::LeftBracket
                 | TokenKind::Quote
                 | TokenKind::Quasiquote
-                | TokenKind::Integer(_)
                 | TokenKind::Number(_)
                 | TokenKind::String(_)
                 | TokenKind::Character(_)
@@ -156,7 +155,6 @@ impl Parser {
 
         match token.kind {
             TokenKind::Number(n) => Ok(Expr::Number(n, token.span)),
-            TokenKind::Integer(i) => Ok(Expr::Integer(i, token.span)),
             TokenKind::String(s) => Ok(Expr::String(s, token.span)),
             TokenKind::Character(c) => Ok(Expr::Character(c, token.span)),
             TokenKind::Boolean(b) => Ok(Expr::Boolean(b, token.span)),
@@ -327,13 +325,14 @@ impl ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::num::Num;
 
     #[test]
     fn test_parser_atoms() {
         let exprs = Parser::parse_from_str("42 foo #t").unwrap();
 
         assert_eq!(exprs.len(), 3);
-        assert!(matches!(exprs[0], Expr::Integer(42, _)));
+        assert!(matches!(&exprs[0], Expr::Number(n, _) if n == &Num::int(42)));
         assert!(matches!(&exprs[1], Expr::Symbol(s, _) if s == "foo"));
         assert!(matches!(exprs[2], Expr::Boolean(true, _)));
     }
@@ -346,8 +345,8 @@ mod tests {
         if let Expr::List(elements, _) = &exprs[0] {
             assert_eq!(elements.len(), 3);
             assert!(matches!(&elements[0], Expr::Symbol(s, _) if s == "+"));
-            assert!(matches!(elements[1], Expr::Integer(1, _)));
-            assert!(matches!(elements[2], Expr::Integer(2, _)));
+            assert!(matches!(&elements[1], Expr::Number(n, _) if n == &Num::int(1)));
+            assert!(matches!(&elements[2], Expr::Number(n, _) if n == &Num::int(2)));
         } else {
             panic!("Expected list");
         }
@@ -364,7 +363,7 @@ mod tests {
             if let Expr::List(inner1, _) = &outer[0] {
                 assert_eq!(inner1.len(), 2);
                 assert!(matches!(&inner1[0], Expr::Symbol(s, _) if s == "f"));
-                assert!(matches!(inner1[1], Expr::Integer(1, _)));
+                assert!(matches!(&inner1[1], Expr::Number(n, _) if n == &Num::int(1)));
             } else {
                 panic!("Expected inner list, got {:?}", outer[0]);
             }
@@ -419,7 +418,7 @@ mod tests {
         let exprs = Parser::parse_from_str("; this is a comment\n42 ; another comment\n").unwrap();
 
         assert_eq!(exprs.len(), 1);
-        assert!(matches!(exprs[0], Expr::Integer(42, _)));
+        assert!(matches!(&exprs[0], Expr::Number(n, _) if n == &Num::int(42)));
     }
 
     #[test]
@@ -535,7 +534,7 @@ mod tests {
         assert!(exprs.len() >= 2); // Should recover and parse multiple expressions
         assert!(!errors.is_empty()); // Should have at least one error
 
-        assert!(matches!(exprs[0], Expr::Integer(42, _)));
+        assert!(matches!(&exprs[0], Expr::Number(n, _) if n == &Num::int(42)));
     }
 
     #[test]
