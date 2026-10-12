@@ -73,6 +73,7 @@ const SNIPPETS: &[(&str, &str)] = &[
         "rational_and_complex_constants",
         "(list 1/3 1+2i 1e21 #x-10)",
     ),
+    ("div_and_quotient_inline", "(list (/ 6 4) (quotient 7 2))"),
 ];
 
 fn compile_text(vm: &mut Vm, src: &str) -> String {
@@ -98,6 +99,15 @@ fn redefinition_revokes_the_inline_licence() {
     insta::assert_snapshot!("plus_pristine", compile_text(&mut vm, "(+ 10 1)"));
     vm.eval_str("(define + -)").unwrap();
     insta::assert_snapshot!("plus_redefined", compile_text(&mut vm, "(+ 10 1)"));
+}
+
+/// `/` and `quotient` inline to `DIV`/`QUOT` under the same licence as `+`.
+#[test]
+fn division_redefinition_revokes_the_inline_licence() {
+    let mut vm = Vm::with_output(Box::new(Vec::new()));
+    insta::assert_snapshot!("div_pristine", compile_text(&mut vm, "(/ 6 4)"));
+    vm.eval_str("(define / -)").unwrap();
+    insta::assert_snapshot!("div_redefined", compile_text(&mut vm, "(/ 6 4)"));
 }
 
 /// A locally bound name shadows both keywords and primitives.

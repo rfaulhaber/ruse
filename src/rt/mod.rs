@@ -8,6 +8,7 @@
 
 pub mod arith;
 pub mod equal;
+pub mod numeric;
 pub mod pairs;
 pub mod prims;
 pub mod vectors;

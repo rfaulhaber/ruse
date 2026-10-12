@@ -94,7 +94,7 @@ impl PrimTable {
     }
 }
 
-/// Install the M3 primitive set: register each native and bind it as a pristine global.
+/// Install the primitive set: register each native and bind it as a pristine global.
 pub fn install(prims: &mut PrimTable, heap: &mut Heap, globals: &mut Globals) {
     let defs: &[(&str, usize, Option<usize>, NativeFn)] = &[
         ("+", 0, None, n_add),
@@ -137,7 +137,8 @@ pub fn install(prims: &mut PrimTable, heap: &mut Heap, globals: &mut Globals) {
         ("append", 0, None, n_append),
         ("list->vector", 1, Some(1), n_list_to_vector),
     ];
-    for &(name, min, max, func) in defs {
+    // The numeric surface follows the literal table so every earlier index stays put.
+    for &(name, min, max, func) in defs.iter().chain(rt::numeric::DEFS) {
         let index = prims.register(PrimDef {
             name: name.to_string(),
             min_args: min,
@@ -154,7 +155,7 @@ pub fn install(prims: &mut PrimTable, heap: &mut Heap, globals: &mut Globals) {
 
 /// Argument access that cannot panic: arity was validated before dispatch, so a miss is
 /// unreachable, and `undefined` errors loudly downstream if it ever is not.
-fn arg(args: &[Value], i: usize) -> Value {
+pub(super) fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).copied().unwrap_or(Value::UNDEFINED)
 }
 
@@ -248,12 +249,8 @@ fn n_ge(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn n_zero_p(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
-    let zero = ctx.heap.integer(0);
-    Ok(Value::boolean(rt::arith::num_eq(
-        ctx.heap,
-        arg(args, 0),
-        zero,
-    )?))
+    let x = rt::arith::operand(ctx.heap, "zero?", arg(args, 0))?;
+    Ok(Value::boolean(x.is_zero()))
 }
 
 // ---------------------------------------------------------------- pairs and lists
@@ -367,11 +364,7 @@ fn n_number_p(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError>
 }
 
 fn n_integer_p(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
-    let v = arg(args, 0);
-    let is_int = v.is_fixnum()
-        || ctx.heap.tag_of(v) == Some(HeapTag::Bignum)
-        // R7RS §6.2.4: (integer? 3.0) is #t — inexact integers are integers.
-        || v.as_flonum().is_some_and(|x| x.is_finite() && x.fract() == 0.0);
+    let is_int = rt::arith::unbox(ctx.heap, arg(args, 0)).is_some_and(|n| n.is_integer());
     Ok(Value::boolean(is_int))
 }
 

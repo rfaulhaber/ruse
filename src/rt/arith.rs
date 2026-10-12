@@ -69,7 +69,7 @@ pub(crate) fn num_err(op: &'static str, e: NumError) -> VmError {
 }
 
 /// `v` as a tower number, or the wrong-type error naming `op`.
-fn operand(heap: &Heap, op: &'static str, v: Value) -> Result<Num, VmError> {
+pub(crate) fn operand(heap: &Heap, op: &'static str, v: Value) -> Result<Num, VmError> {
     unbox(heap, v).ok_or_else(|| wrong_type(heap, op, "a number", v))
 }
 

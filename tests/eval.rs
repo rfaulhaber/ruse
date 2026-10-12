@@ -706,3 +706,195 @@ fn numeric_literals_read_compute_and_print() {
         Some(true)
     );
 }
+
+#[test]
+fn numeric_predicates_and_exactness() {
+    let mut vm = vm();
+    for (src, expect) in [
+        ("(real? -2.5+0i)", true),
+        ("(real? -2.5+0.0i)", false),
+        ("(rational? 6/10)", true),
+        ("(rational? +inf.0)", false),
+        ("(integer? 3+0i)", true),
+        ("(integer? 3.0)", true),
+        ("(exact? #e3.0)", true),
+        ("(inexact? 3.)", true),
+        ("(exact-integer? 32/5)", false),
+        ("(finite? 3.0+inf.0i)", false),
+        ("(nan? 1+2i)", false),
+        ("(nan? +nan.0)", true),
+        ("(positive? +nan.0)", false),
+        ("(zero? 0.0+0.0i)", true),
+        ("(even? 0)", true),
+        ("(odd? -7)", true),
+        ("(= 1 1.0 1.0+0.0i)", true),
+        ("(= 1.0 1.0+1.0i)", false),
+        ("(< +nan.0 0)", false),
+        ("(= 9007199254740992.0 9007199254740993)", false),
+    ] {
+        assert_eq!(eval(&mut vm, src), Value::boolean(expect), "{src}");
+    }
+    assert_eq!(show(&mut vm, "(exact 0.5)"), "1/2");
+    assert_eq!(show(&mut vm, "(exact 1.0)"), "1");
+    assert_eq!(show(&mut vm, "(inexact 1/3)"), "0.3333333333333333");
+    assert_eq!(show(&mut vm, "(exact->inexact 1)"), "1.0");
+    assert_eq!(show(&mut vm, "(inexact->exact 2.5)"), "5/2");
+}
+
+#[test]
+fn arithmetic_breadth() {
+    let mut vm = vm();
+    for (src, expect) in [
+        ("(/ 1 3)", "1/3"),
+        ("(/ 6 4)", "3/2"),
+        ("(/ 2)", "1/2"),
+        ("(/ 1.0 0.0)", "+inf.0"),
+        ("(/ -1073741824 -1)", "1073741824"),
+        ("(/ -4611686018427387904 -1)", "4611686018427387904"),
+        ("(quotient -4611686018427387904 -1)", "4611686018427387904"),
+        ("(max 3.9 4)", "4.0"),
+        ("(max 5 3.9 4)", "5.0"),
+        ("(min 3 3.1)", "3.0"),
+        ("(max 100 +inf.0)", "+inf.0"),
+        ("(min -inf.0 -100)", "-inf.0"),
+        ("(abs -7/2)", "7/2"),
+        ("(remainder -13 -4.0)", "-1.0"),
+        ("(modulo -13 4)", "3"),
+        ("(floor-quotient 5 -2)", "-3"),
+        ("(truncate-remainder -5 2)", "-1"),
+        ("(gcd 32 -36)", "4"),
+        ("(gcd)", "0"),
+        ("(lcm 32.0 -36)", "288.0"),
+        ("(lcm)", "1"),
+        ("(numerator (/ 6 4))", "3"),
+        ("(denominator (inexact (/ 6 4)))", "2.0"),
+        ("(numerator 5.5)", "11.0"),
+        ("(round 7/2)", "4"),
+        ("(round -7/2)", "-4"),
+        ("(round 2.5)", "2.0"),
+        ("(floor -4.3)", "-5.0"),
+        ("(ceiling 3.5)", "4.0"),
+        ("(truncate -4.3)", "-4.0"),
+        ("(rationalize (exact .3) 1/10)", "1/3"),
+        ("(rationalize .3 1/10)", "0.3333333333333333"),
+        ("(square 1/2)", "1/4"),
+        ("(square -2.0)", "4.0"),
+        ("(number->string 255 16)", "\"ff\""),
+        ("(number->string 1/3)", "\"1/3\""),
+        ("(string->number \"1e2\")", "100.0"),
+        ("(string->number \"#e1.5\")", "3/2"),
+        ("(string->number \"1 2\")", "#f"),
+        ("(string->number \"ff\" 16)", "255"),
+        ("(string->number \"#d10\" 16)", "10"),
+    ] {
+        assert_eq!(show(&mut vm, src), expect, "{src}");
+    }
+}
+
+#[test]
+fn numeric_errors_are_typed() {
+    let mut vm = vm();
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(/ 1 0)")),
+        VmErrorKind::DivisionByZero { op: "/" }
+    ));
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(/ 1.0 0)")),
+        VmErrorKind::DivisionByZero { op: "/" }
+    ));
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(quotient 5 0)")),
+        VmErrorKind::DivisionByZero { op: "quotient" }
+    ));
+    eval(&mut vm, "(define (f x) (quotient x 0))"); // compiles to QUOT under the licence
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(f 5)")),
+        VmErrorKind::DivisionByZero { op: "quotient" }
+    ));
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(exact +inf.0)")),
+        VmErrorKind::NumericDomain { op: "exact", .. }
+    ));
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(number->string 1.5 16)")),
+        VmErrorKind::NumericDomain {
+            op: "number->string",
+            ..
+        }
+    ));
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(number->string 1 3)")),
+        VmErrorKind::NumericDomain {
+            op: "number->string",
+            ..
+        }
+    ));
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(positive? 1+i)")),
+        VmErrorKind::NumericDomain {
+            op: "positive?",
+            ..
+        }
+    ));
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(abs 'a)")),
+        VmErrorKind::WrongType { op: "abs", .. }
+    ));
+    if let RuseError::Vm(e) = eval_err(&mut vm, "(/ 1 0)") {
+        assert!(e.span.is_some());
+    }
+}
+
+#[test]
+fn numeric_natives_check_what_the_tower_cannot_see() {
+    let mut vm = vm();
+    // Type predicates accept any object; the sign and parity tests do not.
+    for src in ["(real? 'a)", "(nan? \"x\")", "(exact? #t)"] {
+        assert_eq!(eval(&mut vm, src), Value::FALSE, "{src}");
+    }
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(zero? 'a)")),
+        VmErrorKind::WrongType { op: "zero?", .. }
+    ));
+    assert_eq!(eval(&mut vm, "(even? 2.0)"), Value::TRUE);
+    for src in [
+        "(odd? 1.5)",
+        "(even? 1/2)",
+        "(max 1+i)",
+        "(gcd 5.5)",
+        "(lcm 1/2)",
+    ] {
+        assert!(
+            matches!(
+                vm_kind(&eval_err(&mut vm, src)),
+                VmErrorKind::NumericDomain { .. }
+            ),
+            "{src}"
+        );
+    }
+    // A radix outside R7RS's four is an error, not the quiet #f that parsing would give.
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(string->number \"10\" 3)")),
+        VmErrorKind::NumericDomain {
+            op: "string->number",
+            ..
+        }
+    ));
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(string->number 10)")),
+        VmErrorKind::WrongType {
+            op: "string->number",
+            ..
+        }
+    ));
+    // Folds start from the first argument: `(/ x)` is a reciprocal, longer calls divide
+    // left to right, and a lone argument is still checked.
+    assert_eq!(show(&mut vm, "(/ 1 2 4)"), "1/8");
+    assert_eq!(show(&mut vm, "(/ 0.0)"), "+inf.0");
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(/ 0)")),
+        VmErrorKind::DivisionByZero { op: "/" }
+    ));
+    assert_eq!(show(&mut vm, "(gcd -4)"), "4");
+    assert_eq!(show(&mut vm, "(max 2/3)"), "2/3");
+}

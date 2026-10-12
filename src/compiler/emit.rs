@@ -914,6 +914,10 @@ impl Compiler<'_> {
             ("+", _) => self.fold(Op::Add, args, dst, span)?,
             ("-", _) if args.len() >= 2 => self.fold(Op::Sub, args, dst, span)?,
             ("*", _) => self.fold(Op::Mul, args, dst, span)?,
+            // `(/ x)` is a reciprocal with no opcode of its own; it and the calls longer
+            // than two operands run the native.
+            ("/", [_, _]) => self.fold(Op::Div, args, dst, span)?,
+            ("quotient", [_, _]) => self.fold(Op::Quot, args, dst, span)?,
             ("=" | "<" | "<=" | ">" | ">=" | "eq?" | "eqv?", [x, y]) => {
                 let (op, x, y) = match name {
                     "=" => (Op::NumEq, x, y),

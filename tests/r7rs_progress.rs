@@ -254,8 +254,9 @@ const SHIM: &str = "
 
 /// The suite ratchet, not a target — bump it when a later milestone makes more of the
 /// suite runnable, never lower it. 115 was M3's language slice; 156 is M4's (closures,
-/// derived forms, variadics, quasiquote).
-const MIN_PASSED: i64 = 156;
+/// derived forms, variadics, quasiquote); 290 is M5's (the numeric tower and its
+/// procedures).
+const MIN_PASSED: i64 = 290;
 
 #[test]
 fn r7rs_suite_slice() {
