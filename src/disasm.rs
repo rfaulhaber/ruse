@@ -21,6 +21,7 @@ use crate::bytecode::op::Op;
 use crate::bytecode::proto::{Proto, UpvalDesc};
 use crate::bytecode::verify::{child_label, root_label};
 use crate::gc::Heap;
+use crate::num::print::flonum_text;
 use crate::rt::arith::unbox;
 use crate::value::Value;
 use crate::value::layout::{
@@ -323,15 +324,15 @@ fn singleton_name(bx: u16) -> Option<&'static str> {
 
 /// A constant, rendered by content — never by address.
 ///
-/// This is a listing aid, not the R7RS `write` (which arrives in M3): flonums print as
-/// Rust's `Debug` text, and compound heap values print opaquely rather than recursively,
-/// because a constant pool can hold a cyclic quoted structure.
+/// This is a listing aid, not the R7RS `write`: numbers are spelled the way `write` spells
+/// them, so a listing and a REPL agree, but compound heap values print opaquely rather than
+/// recursively, because a constant pool can hold a cyclic quoted structure.
 fn const_text(heap: &Heap, v: Value) -> String {
     if let Some(n) = v.as_fixnum() {
         return n.to_string();
     }
     if let Some(x) = v.as_flonum() {
-        return format!("{x:?}");
+        return flonum_text(x);
     }
     if let Some(c) = v.as_char() {
         return format!("#\\{c}");

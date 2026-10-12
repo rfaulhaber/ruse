@@ -457,14 +457,35 @@ impl Lexer {
         self.is_identifier_start(c) || c.is_ascii_digit()
     }
 
-    /// Whether `text` is shaped like an identifier. A leading digit is excluded so that a
-    /// malformed number such as `12abc` is reported rather than read as a symbol.
+    /// Whether `text` is an R7RS identifier (§7.1.1, without the `|...|` form). This is
+    /// stricter than the character set `identifier()` scans with: a malformed number such
+    /// as `12abc`, `-1+` or `.5foo` has to be reported, not read as a symbol.
     fn is_identifier(&self, text: &str) -> bool {
+        let is_initial = |c: char| c.is_alphabetic() || "!$%&*/:<=>?^_~".contains(c);
+        let is_sign = |c: char| c == '+' || c == '-';
+        let is_subsequent =
+            |c: char| is_initial(c) || c.is_ascii_digit() || is_sign(c) || c == '.' || c == '@';
+        let is_sign_subsequent = |c: char| is_initial(c) || is_sign(c) || c == '@';
+        let is_dot_subsequent = |c: char| is_sign_subsequent(c) || c == '.';
+
         let mut chars = text.chars();
-        chars
-            .next()
-            .is_some_and(|c| !c.is_ascii_digit() && self.is_identifier_start(c))
-            && chars.all(|c| self.is_identifier_subsequent(c))
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if is_initial(first) {
+            return chars.all(is_subsequent);
+        }
+        match first {
+            '+' | '-' => match chars.next() {
+                None => true,
+                Some('.') => {
+                    chars.next().is_some_and(is_dot_subsequent) && chars.all(is_subsequent)
+                }
+                Some(c) => is_sign_subsequent(c) && chars.all(is_subsequent),
+            },
+            '.' => chars.next().is_some_and(is_dot_subsequent) && chars.all(is_subsequent),
+            _ => false,
+        }
     }
 
     fn is_delimiter(&self, c: char) -> bool {
@@ -651,6 +672,19 @@ mod tests {
     }
 
     #[test]
+    fn peculiar_identifiers_are_not_mistaken_for_numbers() {
+        for name in [
+            "+", "-", "...", "->x", "+soup+", "-in", ".foo", "+.a", "+i2", "-nan.1",
+        ] {
+            assert_eq!(
+                lex_kinds(name),
+                vec![TokenKind::Identifier(name.to_string())],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_numbers_are_one_error() {
         for src in [
             "1+",
@@ -661,6 +695,10 @@ mod tests {
             "#e1e999999999",
             "1_0",
             "9223372036854775808x",
+            "-1+",
+            "+1x",
+            ".5foo",
+            "+.5x",
         ] {
             assert!(
                 matches!(lex_err(src), LexError::InvalidNumber { .. }),
