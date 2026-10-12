@@ -49,7 +49,7 @@ pub fn type_name(heap: &Heap, v: Value) -> &'static str {
         Some(HeapTag::Bytevector) => "bytevector",
         Some(HeapTag::Closure | HeapTag::NativeProc) => "procedure",
         Some(HeapTag::UpvalueCell) => "upvalue cell",
-        Some(HeapTag::Bignum) => "number",
+        Some(HeapTag::Bignum | HeapTag::Ratnum | HeapTag::Compnum) => "number",
         Some(HeapTag::Record) => "record",
         Some(HeapTag::RecordType) => "record type",
         None => "unknown value",

@@ -21,12 +21,13 @@ use crate::bytecode::op::Op;
 use crate::bytecode::proto::{Proto, UpvalDesc};
 use crate::bytecode::verify::{child_label, root_label};
 use crate::gc::Heap;
+use crate::rt::arith::unbox;
 use crate::value::Value;
 use crate::value::layout::{
     HeapTag, SINGLETON_EOF, SINGLETON_FALSE, SINGLETON_NULL, SINGLETON_TRUE, SINGLETON_UNDEFINED,
     SINGLETON_UNSPECIFIED,
 };
-use crate::value::object::{Bignum, Str, Symbol};
+use crate::value::object::{Str, Symbol};
 
 /// The column where `; comments` begin, when the operands leave room.
 const COMMENT_COL: usize = 40;
@@ -356,9 +357,15 @@ fn const_text(heap: &Heap, v: Value) -> String {
         Some(HeapTag::Str) => heap
             .get::<Str>(v)
             .map_or_else(|| "#<string>".to_string(), |s| format!("{:?}", s.chars)),
-        Some(HeapTag::Bignum) => heap
-            .get::<Bignum>(v)
-            .map_or_else(|| "#<bignum>".to_string(), |b| b.value.to_string()),
+        Some(HeapTag::Bignum) => {
+            unbox(heap, v).map_or_else(|| "#<bignum>".to_string(), |n| n.to_string())
+        }
+        Some(HeapTag::Ratnum) => {
+            unbox(heap, v).map_or_else(|| "#<ratnum>".to_string(), |n| n.to_string())
+        }
+        Some(HeapTag::Compnum) => {
+            unbox(heap, v).map_or_else(|| "#<compnum>".to_string(), |n| n.to_string())
+        }
         Some(HeapTag::Pair) => "#<pair>".to_string(),
         Some(HeapTag::Vector) => "#<vector>".to_string(),
         Some(HeapTag::Bytevector) => "#<bytevector>".to_string(),

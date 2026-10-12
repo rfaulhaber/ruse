@@ -17,6 +17,7 @@ use num_bigint::BigInt;
 
 use crate::bytecode::Proto;
 use crate::gc::Tracer;
+use crate::num::{BigRational, Complex};
 use crate::value::Value;
 use crate::value::layout::{GcHeader, HeapTag};
 
@@ -443,7 +444,108 @@ unsafe impl HeapObject for Bignum {
     fn trace_fields(&self, _tracer: &mut Tracer<'_>) {}
 
     fn extra_bytes(&self) -> usize {
-        (self.value.bits() as usize).div_ceil(8)
+        digit_bytes(&self.value)
+    }
+}
+
+/// Bytes of digit storage behind a `BigInt`, for the collection trigger's accounting.
+fn digit_bytes(n: &BigInt) -> usize {
+    (n.bits() as usize).div_ceil(8)
+}
+
+/// An exact non-integer rational.
+///
+/// Only ever reached through [`Heap::number`](crate::gc::Heap::number). A `Num::Rat`
+/// always has a denominator greater than 1, so a `Ratnum` never holds a whole number.
+#[repr(C)]
+pub struct Ratnum {
+    pub(crate) header: GcHeader,
+    /// The ratio, in lowest terms.
+    pub value: BigRational,
+}
+
+impl Ratnum {
+    pub(crate) fn new(value: BigRational) -> Self {
+        Self {
+            header: GcHeader::unlinked(HeapTag::Ratnum),
+            value,
+        }
+    }
+}
+
+impl Header for Ratnum {
+    fn header_mut(&mut self) -> &mut GcHeader {
+        &mut self.header
+    }
+}
+
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. A `Ratnum` owns a `BigRational` and no `Value`s, so
+// there is nothing to trace.
+unsafe impl HeapObject for Ratnum {
+    const TAG: HeapTag = HeapTag::Ratnum;
+
+    fn trace_fields(&self, _tracer: &mut Tracer<'_>) {}
+
+    fn extra_bytes(&self) -> usize {
+        ratio_bytes(&self.value)
+    }
+}
+
+/// Bytes of digit storage behind a ratio's numerator and denominator.
+fn ratio_bytes(r: &BigRational) -> usize {
+    digit_bytes(r.numer()) + digit_bytes(r.denom())
+}
+
+/// The two kinds of complex number a [`Compnum`] can hold.
+///
+/// Exactness is part of a number's identity — `1+2i` and `1.0+2.0i` are not `eqv?` — so
+/// the two forms are kept apart rather than stored as one type of floats.
+pub enum CompnumRepr {
+    /// Both parts exact, with a non-zero imaginary part.
+    Exact(Complex<BigRational>),
+    /// Both parts inexact; an inexact zero imaginary part is kept.
+    Inexact(Complex<f64>),
+}
+
+/// A complex number that [`Num`](crate::num::Num) could not collapse to a real.
+///
+/// Only ever reached through [`Heap::number`](crate::gc::Heap::number).
+#[repr(C)]
+pub struct Compnum {
+    pub(crate) header: GcHeader,
+    /// The number, in its exact or inexact form.
+    pub value: CompnumRepr,
+}
+
+impl Compnum {
+    pub(crate) fn new(value: CompnumRepr) -> Self {
+        Self {
+            header: GcHeader::unlinked(HeapTag::Compnum),
+            value,
+        }
+    }
+}
+
+impl Header for Compnum {
+    fn header_mut(&mut self) -> &mut GcHeader {
+        &mut self.header
+    }
+}
+
+// SAFETY: `#[repr(C)]` with `GcHeader` first, asserted in `layout`, and `TAG` is the tag
+// the allocator writes into that header. A `Compnum` owns its parts and no `Value`s, so there
+// is nothing to trace.
+unsafe impl HeapObject for Compnum {
+    const TAG: HeapTag = HeapTag::Compnum;
+
+    fn trace_fields(&self, _tracer: &mut Tracer<'_>) {}
+
+    fn extra_bytes(&self) -> usize {
+        match &self.value {
+            CompnumRepr::Exact(z) => ratio_bytes(&z.re) + ratio_bytes(&z.im),
+            CompnumRepr::Inexact(_) => 0,
+        }
     }
 }
 

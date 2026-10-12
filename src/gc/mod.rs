@@ -33,11 +33,12 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
 use crate::bytecode::Proto;
+use crate::num::Num;
 use crate::value::Value;
 use crate::value::layout::{Color, GcHeader, HeapTag};
 use crate::value::object::{
-    Bignum, Bytevector, Closure, HeapObject, NativeProc, Pair, Record, RecordType, Str, Symbol,
-    UpvalueCell, Vector, set_header,
+    Bignum, Bytevector, Closure, Compnum, CompnumRepr, HeapObject, NativeProc, Pair, Ratnum,
+    Record, RecordType, Str, Symbol, UpvalueCell, Vector, set_header,
 };
 
 /// Floor for the collection threshold: below this, collecting costs more than the memory it
@@ -239,9 +240,10 @@ impl Heap {
     /// The exact integer `n`, as a fixnum when it fits and a bignum when it does not.
     ///
     /// This and [`Heap::integer_from_big`] are the only two places in ruse that decide
-    /// between the two representations. Everything upstream — the reader, the numeric tower,
-    /// the arithmetic opcodes' overflow paths — funnels through them, so "when does an
-    /// integer stop being immediate" has exactly one answer.
+    /// between the two integer representations, and [`Heap::number`] is the one place that
+    /// chooses a representation for any number. Everything upstream — the reader, the
+    /// numeric tower, the arithmetic opcodes' overflow paths — funnels through them, so
+    /// "when does an integer stop being immediate" has exactly one answer.
     ///
     /// ```
     /// # use ruse::gc::Heap;
@@ -270,6 +272,23 @@ impl Heap {
             return v;
         }
         self.alloc(Bignum::new(n))
+    }
+
+    /// The Scheme value for `n`: the single place that decides a number's representation.
+    ///
+    /// Integers go through [`Heap::integer_from_big`], so they are fixnums whenever they
+    /// fit; flonums are immediate; ratios and complexes are heap objects. [`Num`]'s
+    /// constructors already guarantee the canonical variant (a whole ratio is an `Int`, an
+    /// exact-zero imaginary part is a real), so equal numbers always get the same
+    /// representation and `eqv?` never has to compare across representations.
+    pub fn number(&mut self, n: Num) -> Value {
+        match n {
+            Num::Int(b) => self.integer_from_big(b),
+            Num::Rat(r) => self.alloc(Ratnum::new(r)),
+            Num::Flo(x) => Value::flonum(x),
+            Num::ExactComplex(z) => self.alloc(Compnum::new(CompnumRepr::Exact(z))),
+            Num::InexactComplex(z) => self.alloc(Compnum::new(CompnumRepr::Inexact(z))),
+        }
     }
 
     // ---------------------------------------------------------------- symbols
@@ -611,6 +630,8 @@ unsafe fn trace_object(p: *mut GcHeader, tracer: &mut Tracer<'_>) {
             HeapTag::RecordType => (*p.cast::<RecordType>()).trace_fields(tracer),
             HeapTag::Closure => (*p.cast::<Closure>()).trace_fields(tracer),
             HeapTag::NativeProc => (*p.cast::<NativeProc>()).trace_fields(tracer),
+            HeapTag::Ratnum => (*p.cast::<Ratnum>()).trace_fields(tracer),
+            HeapTag::Compnum => (*p.cast::<Compnum>()).trace_fields(tracer),
         }
     }
 }
@@ -644,6 +665,8 @@ unsafe fn drop_object(p: *mut GcHeader) {
             HeapTag::RecordType => drop_as::<RecordType>(p),
             HeapTag::Closure => drop_as::<Closure>(p),
             HeapTag::NativeProc => drop_as::<NativeProc>(p),
+            HeapTag::Ratnum => drop_as::<Ratnum>(p),
+            HeapTag::Compnum => drop_as::<Compnum>(p),
         }
     }
 }
@@ -681,6 +704,8 @@ unsafe fn object_bytes(p: *mut GcHeader) -> usize {
             HeapTag::RecordType => size_as::<RecordType>(p),
             HeapTag::Closure => size_as::<Closure>(p),
             HeapTag::NativeProc => size_as::<NativeProc>(p),
+            HeapTag::Ratnum => size_as::<Ratnum>(p),
+            HeapTag::Compnum => size_as::<Compnum>(p),
         }
     }
 }
@@ -696,6 +721,7 @@ unsafe fn size_as<T: HeapObject>(p: *mut GcHeader) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::num::BigRational;
     use crate::value::{FIXNUM_MAX, FIXNUM_MIN};
 
     /// A root set built from a plain vector of values, which is the shape the VM's register
@@ -814,6 +840,32 @@ mod tests {
         assert!(heap.contains(kept_str));
         let cdr = heap.get::<Pair>(kept).unwrap().cdr;
         assert_eq!(heap.get::<Str>(cdr).unwrap().chars, "kept");
+    }
+
+    #[test]
+    fn rationals_and_complexes_are_heap_objects_that_survive_and_die() {
+        let mut heap = Heap::new();
+        let third = heap.number(Num::rational(1.into(), 3.into()).unwrap());
+        let z = heap.number(Num::rectangular(&Num::flo(1.0), &Num::flo(2.0)).unwrap());
+        heap.number(Num::rational(2.into(), 3.into()).unwrap()); // garbage
+        assert_eq!(heap.tag_of(third), Some(HeapTag::Ratnum));
+        assert_eq!(heap.tag_of(z), Some(HeapTag::Compnum));
+        assert!(heap.number(Num::int(5)).is_fixnum());
+        assert!(
+            heap.number(Num::rational(4.into(), 2.into()).unwrap())
+                .is_fixnum()
+        );
+        assert!(heap.number(Num::flo(2.5)).is_flonum());
+        let big = heap.number(Num::int(BigInt::from(2).pow(60)));
+        assert_eq!(heap.tag_of(big), Some(HeapTag::Bignum));
+        let live = heap.live_objects();
+        let stats = collect(&mut heap, &Roots(vec![third, z]));
+        assert_eq!(stats.freed, 2); // the 2/3 and the 2^60
+        assert_eq!(heap.live_objects(), live - 2);
+        assert_eq!(
+            heap.get::<Ratnum>(third).unwrap().value,
+            BigRational::new(1.into(), 3.into())
+        );
     }
 
     /// A reference cycle is exactly what a reference count cannot free, and it is why

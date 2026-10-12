@@ -17,10 +17,11 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use crate::gc::Heap;
+use crate::num;
 use crate::rt::wrong_type;
 use crate::value::Value;
 use crate::value::layout::HeapTag;
-use crate::value::object::Bignum;
+use crate::value::object::{Bignum, Compnum, CompnumRepr, Ratnum};
 use crate::vm::error::VmError;
 
 /// A number unboxed for one operation.
@@ -75,6 +76,31 @@ fn classify(heap: &Heap, v: Value, op: &'static str) -> Result<Num, VmError> {
 /// Whether `v` is a number in the M3 slice.
 pub fn is_number(heap: &Heap, v: Value) -> bool {
     v.is_fixnum() || v.is_flonum() || heap.tag_of(v) == Some(HeapTag::Bignum)
+}
+
+/// The tower value behind `v`, or `None` when `v` is not a number. The inverse of
+/// [`Heap::number`].
+pub fn unbox(heap: &Heap, v: Value) -> Option<num::Num> {
+    if let Some(n) = v.as_fixnum() {
+        return Some(num::Num::int(n));
+    }
+    if let Some(x) = v.as_flonum() {
+        return Some(num::Num::flo(x));
+    }
+    match heap.tag_of(v)? {
+        HeapTag::Bignum => heap
+            .get::<Bignum>(v)
+            .map(|b| num::Num::int(b.value.clone())),
+        HeapTag::Ratnum => heap
+            .get::<Ratnum>(v)
+            .map(|r| num::Num::from_ratio(r.value.clone())),
+        HeapTag::Compnum => heap.get::<Compnum>(v).map(|c| match &c.value {
+            // Boxed from a canonical `Num`, so the exact variant needs no re-canonicalising.
+            CompnumRepr::Exact(z) => num::Num::ExactComplex(z.clone()),
+            CompnumRepr::Inexact(z) => num::Num::inexact_complex(*z),
+        }),
+        _ => None,
+    }
 }
 
 fn binop(

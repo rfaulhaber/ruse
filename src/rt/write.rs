@@ -9,9 +9,10 @@
 //! 200k-cell list must print, not overflow the Rust stack.
 
 use crate::gc::Heap;
+use crate::rt::arith::unbox;
 use crate::value::Value;
 use crate::value::layout::HeapTag;
-use crate::value::object::{Bignum, Bytevector, Closure, NativeProc, Pair, Str, Symbol, Vector};
+use crate::value::object::{Bytevector, Closure, NativeProc, Pair, Str, Symbol, Vector};
 
 /// Which audience the text is for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -125,9 +126,9 @@ fn atom(heap: &Heap, v: Value, style: Style, out: &mut String) {
                 out.push_str(&s.name);
             }
         }
-        Some(HeapTag::Bignum) => {
-            if let Some(b) = heap.get::<Bignum>(v) {
-                out.push_str(&b.value.to_string());
+        Some(HeapTag::Bignum | HeapTag::Ratnum | HeapTag::Compnum) => {
+            if let Some(n) = unbox(heap, v) {
+                out.push_str(&n.to_string());
             }
         }
         Some(HeapTag::Bytevector) => {
@@ -209,6 +210,7 @@ fn quote_string(s: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::num::Num;
 
     fn fix(n: i64) -> Value {
         Value::fixnum(n).unwrap()
@@ -235,6 +237,16 @@ mod tests {
         assert_eq!(wr(&heap, Value::flonum(f64::NEG_INFINITY)), "-inf.0");
         let big = heap.integer(crate::value::FIXNUM_MAX + 1);
         assert_eq!(wr(&heap, big), "140737488355328");
+    }
+
+    #[test]
+    fn tower_values_print() {
+        let mut heap = Heap::new();
+        let third = heap.number(Num::parse("1/3", 10).unwrap());
+        let z = heap.number(Num::parse("0.0+1.0i", 10).unwrap());
+        assert_eq!(wr(&heap, third), "1/3");
+        assert_eq!(disp(&heap, third), "1/3");
+        assert_eq!(wr(&heap, z), "0.0+1.0i");
     }
 
     #[test]

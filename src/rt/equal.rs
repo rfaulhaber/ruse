@@ -7,9 +7,10 @@
 //! conformance shim only compares reader-built data, which cannot be cyclic until M6.
 
 use crate::gc::Heap;
+use crate::rt::arith::unbox;
 use crate::value::Value;
 use crate::value::layout::HeapTag;
-use crate::value::object::{Bignum, Bytevector, Pair, Str, Vector};
+use crate::value::object::{Bytevector, Pair, Str, Vector};
 
 /// R7RS `eqv?`.
 pub fn eqv(heap: &Heap, a: Value, b: Value) -> bool {
@@ -19,11 +20,12 @@ pub fn eqv(heap: &Heap, a: Value, b: Value) -> bool {
     if a == b {
         return true;
     }
-    // The one same-value-different-object case in the M3 numeric slice: two bignum
-    // allocations. A bignum can never be `eqv?` to a fixnum — canonical demotion in
-    // `Heap::integer_from_big` means an in-range value is always represented immediate.
-    match (heap.get::<Bignum>(a), heap.get::<Bignum>(b)) {
-        (Some(x), Some(y)) => x.value == y.value,
+    // The same-value-different-object case: two heap numbers (bignums, ratnums,
+    // compnums) of one value. A heap number is never `eqv?` to an immediate:
+    // `Heap::number` keeps every integer that fits a fixnum immediate, and no heap number
+    // is an inexact real.
+    match (unbox(heap, a), unbox(heap, b)) {
+        (Some(x), Some(y)) => x.eqv(&y),
         _ => false,
     }
 }
@@ -92,6 +94,7 @@ pub fn equal(heap: &Heap, a: Value, b: Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::num::Num;
     use crate::value::FIXNUM_MAX;
 
     fn fix(n: i64) -> Value {
@@ -123,6 +126,20 @@ mod tests {
         let s2 = heap.string("x");
         assert!(!eqv(&heap, s1, s2), "string eqv? is identity");
         assert!(eqv(&heap, s1, s1));
+    }
+
+    #[test]
+    fn eqv_on_the_tower() {
+        let mut heap = Heap::new();
+        let mut num = |text: &str| heap.number(Num::parse(text, 10).unwrap());
+
+        let (a, b) = (num("1/2"), num("1/2"));
+        let (half, z, w, zf) = (num("0.5"), num("1+2i"), num("1+2i"), num("1.0+2.0i"));
+        assert_ne!(a, b, "distinct allocations are not eq?");
+        assert!(eqv(&heap, a, b));
+        assert!(!eqv(&heap, a, half));
+        assert!(eqv(&heap, z, w));
+        assert!(!eqv(&heap, zf, z));
     }
 
     #[test]
