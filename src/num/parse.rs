@@ -19,8 +19,9 @@ enum Exactness {
 
 impl Num {
     /// Reads all of `text` as one number, or `None` if it is not one. A radix prefix in the
-    /// text overrides `default_radix`, which must be 2, 8, 10 or 16: those are the radixes
-    /// in which `i`, the imaginary unit, is not a digit.
+    /// text overrides `default_radix`, which must be 2, 8, 10 or 16, the radixes R7RS
+    /// `string->number` admits. Refusing the rest here keeps `char::is_digit`, which panics
+    /// above 36, out of reach of caller-supplied values.
     pub fn parse(text: &str, default_radix: u32) -> Option<Num> {
         if !matches!(default_radix, 2 | 8 | 10 | 16) {
             return None;
@@ -132,8 +133,8 @@ impl Reader {
             let denom = self.integer(false, denom_digits)?;
             return Some((Num::rational(numer, denom).ok()?, rest));
         }
-        // Points and exponents exist only in radix 10, which is also the only radix where
-        // the exponent markers are not digits.
+        // R7RS allows a point or an exponent only in radix 10; in radix 16, `e`, `d` and
+        // `f` are digits (`#x1e2` is 482).
         let decimal = self.radix == 10;
         let (fraction, rest) = match rest {
             [b'.', after @ ..] if decimal => {
@@ -485,6 +486,12 @@ mod tests {
             Num::parse(&format!("#e1e{}", MAX_EXACT_DECIMAL_EXPONENT + 1), 10),
             None
         );
+    }
+
+    // Expanding 10^100000 is far too slow to interpret.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_exact_exponent_cap_is_inclusive() {
         assert!(Num::parse(&format!("#e1e{}", MAX_EXACT_DECIMAL_EXPONENT), 10).is_some());
     }
 }
