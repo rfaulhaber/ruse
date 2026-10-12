@@ -7,6 +7,8 @@
 //! precondition is guarded here and surfaces as a [`NumError`], so nothing in this module
 //! can panic on user data.
 
+mod arith;
+
 use std::cmp::Ordering;
 
 pub use num_bigint::BigInt;
