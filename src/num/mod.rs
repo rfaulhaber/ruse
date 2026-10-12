@@ -28,7 +28,9 @@ pub enum Num {
     Flo(f64),
     /// Imaginary part is never exact zero.
     ExactComplex(Complex<BigRational>),
-    /// Both parts are inexact; an inexact zero imaginary part is kept.
+    /// Both parts are inexact; an inexact zero imaginary part is kept. Build it only
+    /// through [`Num::inexact_complex`], which canonicalises NaN parts: the bitwise
+    /// `PartialEq` would otherwise tell two NaN payloads apart.
     InexactComplex(Complex<f64>),
 }
 
@@ -101,12 +103,11 @@ impl Num {
     }
 
     pub fn flo(x: f64) -> Num {
-        // NaNs carry a payload, and `eqv?` compares floats bitwise.
-        if x.is_nan() {
-            Num::Flo(f64::NAN)
-        } else {
-            Num::Flo(x)
-        }
+        Num::Flo(canonical_nan(x))
+    }
+
+    pub fn inexact_complex(z: Complex<f64>) -> Num {
+        Num::InexactComplex(Complex::new(canonical_nan(z.re), canonical_nan(z.im)))
     }
 
     /// `make-rectangular`. The result is complex only when the imaginary part is not an
@@ -115,10 +116,15 @@ impl Num {
         if !re.is_real() || !im.is_real() {
             return Err(NumError::NotReal);
         }
+        // An exact zero means there is no imaginary part, whatever the real part's
+        // exactness: `(real? -2.5+0i)` is `#t`.
+        if im.is_exact() && im.is_zero() {
+            return Ok(re.clone());
+        }
         match (re.exact_real(), im.exact_real()) {
             (Some(re), Some(im)) => Ok(Num::exact_rectangular(re, im)),
             _ => match (re.to_f64(), im.to_f64()) {
-                (Some(re), Some(im)) => Ok(Num::InexactComplex(Complex::new(re, im))),
+                (Some(re), Some(im)) => Ok(Num::inexact_complex(Complex::new(re, im))),
                 _ => Err(NumError::NotReal),
             },
         }
@@ -220,7 +226,7 @@ impl Num {
             Num::Rat(r) => Num::Flo(ratio_to_f64(r)),
             Num::Flo(_) | Num::InexactComplex(_) => self.clone(),
             Num::ExactComplex(c) => {
-                Num::InexactComplex(Complex::new(ratio_to_f64(&c.re), ratio_to_f64(&c.im)))
+                Num::inexact_complex(Complex::new(ratio_to_f64(&c.re), ratio_to_f64(&c.im)))
             }
         }
     }
@@ -251,6 +257,11 @@ impl Num {
             Num::ExactComplex(Complex::new(re, im))
         }
     }
+}
+
+/// NaNs carry a payload, and `eqv?` compares floats bitwise.
+fn canonical_nan(x: f64) -> f64 {
+    if x.is_nan() { f64::NAN } else { x }
 }
 
 fn int_to_f64(i: &BigInt) -> f64 {
@@ -306,6 +317,14 @@ mod tests {
             Num::flo(f64::NAN)
         );
         assert!(matches!(Num::flo(-0.0), Num::Flo(x) if x.is_sign_negative()));
+        assert_eq!(
+            Num::rectangular(&Num::flo(-2.5), &Num::int(0)),
+            Ok(Num::flo(-2.5))
+        );
+        assert_eq!(
+            Num::inexact_complex(Complex::new(1.0, f64::from_bits(0xFFF8_0000_0000_0000))),
+            Num::rectangular(&Num::flo(1.0), &Num::flo(f64::NAN)).unwrap()
+        );
     }
 
     #[test]
