@@ -3,11 +3,22 @@
 //! `exp`, `log` and the trigonometric family answer inexactly even for an exact argument:
 //! `(exp 0)` is `1.0`. A real argument runs on `f64`. Where no real answer exists
 //! (`(log -1)`, `(asin 2)`, `(sqrt -2)`) or the argument is complex, the computation moves
-//! to `Complex<f64>`. `sqrt` and `expt` stay exact where the exact answer is representable
-//! and are inexact otherwise.
+//! to `Complex<f64>`. `sqrt` stays exact for an exact real whose root is a ratio of integers,
+//! and `expt` for an exact base under an exact integer exponent; `(expt 4 1/2)` is `2.0`.
 //!
-//! Where R7RS leaves a result open this module follows chibi: `(log 0)` is `-inf.0`, and
-//! `sqrt` takes the principal branch whatever the sign of a zero imaginary part.
+//! Where R7RS leaves a result open this module follows chibi: `(log 0)` is `-inf.0`,
+//! `(angle +inf.0)` is `0.0`, `(angle -0.0)` is `π` as the signed zero of `atan2` says, and
+//! `sqrt` takes the principal branch whatever the sign of a zero imaginary part. The
+//! choices below are ruse's own:
+//!
+//! - An exact complex base under an exact integer exponent stays exact: `(expt 1+2i 2)` is
+//!   `-3+4i`, where chibi answers with a flonum complex.
+//! - An exact zero base under a positive exponent is an exact zero, `(expt 0 1/2)` included.
+//! - An exact zero base under a negative exponent is an error, `(expt 0 -1.0)` included
+//!   (R7RS §6.2.6), as an exact zero divisor is everywhere. An inexact zero base keeps
+//!   IEEE: `(expt 0.0 -1)` is `+inf.0`.
+//! - A negative base under a fractional exponent is complex: `(expt -8 1/3)`, where chibi
+//!   answers `+nan.0`.
 
 use std::cmp::Ordering;
 use std::f64::consts::PI;
@@ -89,22 +100,29 @@ impl Num {
         }
     }
 
-    /// `expt`. An exact base to an exact integer power is exact. Anything else is inexact:
-    /// real `powf` where it has an answer, complex `powc` where it has none or an operand
-    /// is complex, so `(expt -8 1/3)` is complex.
+    /// `expt`. An exact base to an exact integer power is exact, and so is an exact zero to a
+    /// positive exact power: `(expt 0 1/2)` is `0`. Anything else is inexact: real `powf`
+    /// where it has an answer, complex `powc` where it has none or an operand is complex, so
+    /// `(expt -8 1/3)` is complex. An exact zero base takes the exponent's real part as R7RS
+    /// §6.2.6 does: a positive one gives zero, a negative one is an error.
     pub fn expt(&self, e: &Num) -> NumResult {
         if self.is_exact()
             && let Num::Int(n) = e
         {
             return self.exact_power(n);
         }
-        // Keeps `(expt 0 1/2)` exact: the general case below would round it to a flonum.
-        if self.is_exact() && self.is_zero() && e.sign() == Ok(Some(Ordering::Greater)) {
-            return Ok(if e.is_exact() {
-                Num::int(0)
-            } else {
-                Num::flo(0.0)
-            });
+        if self.is_exact() && self.is_zero() {
+            match e.real_part().sign() {
+                Ok(Some(Ordering::Greater)) => {
+                    return Ok(if e.is_exact() {
+                        Num::int(0)
+                    } else {
+                        Num::flo(0.0)
+                    });
+                }
+                Ok(Some(Ordering::Less)) => return Err(NumError::ZeroToNegativePower),
+                _ => {}
+            }
         }
         match (self.to_f64(), e.to_f64()) {
             (Some(base), Some(power)) if has_real_power(base, power) => {
@@ -139,8 +157,9 @@ impl Num {
         }
     }
 
-    /// The argument in `(-π, π]`. An exact positive real has the exact angle 0; the angle of
-    /// a negative one, and every angle of an inexact number, is a flonum.
+    /// The argument in `(-π, π]`. An exact non-negative real, zero included, has the exact
+    /// angle 0; the angle of a negative one, and every angle of an inexact number, is a
+    /// flonum.
     pub fn angle(&self) -> Num {
         match self {
             Num::Int(_) | Num::Rat(_) if self.sign() == Ok(Some(Ordering::Less)) => Num::flo(PI),
@@ -339,11 +358,19 @@ mod tests {
         assert_eq!(z.expt(&Num::int(2)), Ok(c(Num::int(-3), Num::int(4))));
         assert_eq!(z.expt(&Num::int(-2)), Ok(c(r(-3, 25), r(-4, 25))));
         assert_eq!(z.expt(&Num::int(0)), Ok(Num::int(1)));
-        // An exact zero stays exact under any positive exponent; an inexact negative one
-        // takes the flonum route, where IEEE says infinity.
+        // An exact zero stays exact under any positive exponent and is an error under any
+        // negative one; an inexact zero keeps IEEE.
         assert_eq!(Num::int(0).expt(&r(1, 2)), Ok(Num::int(0)));
         assert_eq!(
+            Num::int(0).expt(&r(-1, 2)),
+            Err(NumError::ZeroToNegativePower)
+        );
+        assert_eq!(
             Num::int(0).expt(&Num::flo(-1.0)),
+            Err(NumError::ZeroToNegativePower)
+        );
+        assert_eq!(
+            Num::flo(0.0).expt(&Num::int(-1)),
             Ok(Num::flo(f64::INFINITY))
         );
         assert_eq!(
