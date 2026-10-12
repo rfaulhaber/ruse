@@ -20,10 +20,14 @@ pub fn eqv(heap: &Heap, a: Value, b: Value) -> bool {
     if a == b {
         return true;
     }
-    // The same-value-different-object case: two heap numbers (bignums, ratnums,
-    // compnums) of one value. A heap number is never `eqv?` to an immediate:
-    // `Heap::number` keeps every integer that fits a fixnum immediate, and no heap number
-    // is an inexact real.
+    // Two distinct immediates are never `eqv?`, since their bits identify them. Nor is a
+    // heap number `eqv?` to an immediate: `Heap::number` keeps every integer that fits a
+    // fixnum immediate, and no heap number is an inexact real. So unboxing, which clones,
+    // is only needed for the same-value-different-object case of two heap numbers
+    // (bignums, ratnums, compnums).
+    if !(a.is_heap() && b.is_heap()) {
+        return false;
+    }
     match (unbox(heap, a), unbox(heap, b)) {
         (Some(x), Some(y)) => x.eqv(&y),
         _ => false,
@@ -135,11 +139,15 @@ mod tests {
 
         let (a, b) = (num("1/2"), num("1/2"));
         let (half, z, w, zf) = (num("0.5"), num("1+2i"), num("1+2i"), num("1.0+2.0i"));
+        let big = num("1267650600228229401496703205376"); // 2^100
         assert_ne!(a, b, "distinct allocations are not eq?");
         assert!(eqv(&heap, a, b));
         assert!(!eqv(&heap, a, half));
         assert!(eqv(&heap, z, w));
         assert!(!eqv(&heap, zf, z));
+        assert!(!eqv(&heap, fix(1), fix(2)));
+        assert!(!eqv(&heap, fix(1), big));
+        assert!(!eqv(&heap, big, fix(1)));
     }
 
     #[test]
