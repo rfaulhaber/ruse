@@ -94,7 +94,8 @@ impl Num {
         if !self.is_real() || !tolerance.is_real() {
             return Err(NumError::NotReal);
         }
-        if self.is_nan() || tolerance.is_nan() {
+        // Two infinities leave `[x - |y|, x + |y|]` undefined.
+        if self.is_nan() || tolerance.is_nan() || (self.is_infinite() && tolerance.is_infinite()) {
             return Ok(Num::flo(f64::NAN));
         }
         if self.is_infinite() {
@@ -128,8 +129,12 @@ impl Num {
         Ok((Num::Int(root), Num::Int(rest)))
     }
 
-    /// The value of an integral number, exact or not, as a `BigInt`.
-    fn exact_integer(&self) -> Result<BigInt, NumError> {
+    /// The value of an integral number, exact or not, as a `BigInt`. An inexact complex is
+    /// not integral even when its imaginary part is zero, and `exact()` would not tell.
+    fn integral_value(&self) -> Result<BigInt, NumError> {
+        if !self.is_integer() {
+            return Err(NumError::NotInteger);
+        }
         match self.exact() {
             Ok(Num::Int(i)) => Ok(i),
             _ => Err(NumError::NotInteger),
@@ -159,8 +164,8 @@ impl Num {
 /// Both operands as exact integers, and whether the answer is inexact.
 fn integer_operands(a: &Num, b: &Num) -> Result<(BigInt, BigInt, bool), NumError> {
     Ok((
-        a.exact_integer()?,
-        b.exact_integer()?,
+        a.integral_value()?,
+        b.integral_value()?,
         !(a.is_exact() && b.is_exact()),
     ))
 }
@@ -350,6 +355,11 @@ mod tests {
         assert_eq!(Num::int(7).floor_quotient(&Num::int(-2)), Ok(Num::int(-4)));
         assert_eq!(Num::int(7).floor_remainder(&Num::int(-2)), Ok(Num::int(-1)));
         assert_eq!(Num::int(0).lcm(&Num::int(5)), Ok(Num::int(0)));
+        // an inexact complex is not an integer, whatever its imaginary part
+        let z = Num::rectangular(&Num::flo(4.0), &Num::flo(0.0)).unwrap();
+        assert_eq!(z.quotient(&Num::int(3)), Err(NumError::NotInteger));
+        assert_eq!(Num::int(7).modulo(&z), Err(NumError::NotInteger));
+        assert_eq!(z.gcd(&Num::int(6)), Err(NumError::NotInteger));
         assert_eq!(r(3, 2).numerator(), Ok(Num::int(3)));
         assert_eq!(r(-3, 2).denominator(), Ok(Num::int(2)));
         assert_eq!(Num::int(7).denominator(), Ok(Num::int(1)));
@@ -397,6 +407,12 @@ mod tests {
         for x in [r(355, 113), r(-355, 113), r(1346269, 832040), r(7, 3)] {
             assert_eq!(x.rationalize(&Num::int(0)), Ok(x.clone()));
         }
+        assert!(
+            Num::flo(f64::INFINITY)
+                .rationalize(&Num::flo(f64::INFINITY))
+                .unwrap()
+                .is_nan()
+        );
         // the tolerance's sign is irrelevant
         assert_eq!(r(3, 10).rationalize(&r(-1, 10)), Ok(r(1, 3)));
     }
