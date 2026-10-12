@@ -1,8 +1,8 @@
 //! Arithmetic and comparison on [`Num`].
 //!
 //! Operands are promoted to the least representation that holds both exactly: exact stays
-//! exact, any inexact operand makes the result inexact, and a real mixed with a complex
-//! is that real with an imaginary part of zero.
+//! exact, any inexact operand makes the result inexact, and an exact real mixed with an
+//! exact complex is that real with an imaginary part of zero.
 
 use std::cmp::Ordering;
 
@@ -17,6 +17,8 @@ impl Num {
             Pair::Rat(a, b) => Num::from_ratio(a + b),
             Pair::Flo(a, b) => Num::flo(a + b),
             Pair::Exact(a, b) => Num::from_exact_complex(a + b),
+            Pair::ComplexReal(a, b) => Num::inexact_complex(a + b),
+            Pair::RealComplex(a, b) => Num::inexact_complex(a + b),
             Pair::Inexact(a, b) => Num::inexact_complex(a + b),
         }
     }
@@ -27,6 +29,8 @@ impl Num {
             Pair::Rat(a, b) => Num::from_ratio(a - b),
             Pair::Flo(a, b) => Num::flo(a - b),
             Pair::Exact(a, b) => Num::from_exact_complex(a - b),
+            Pair::ComplexReal(a, b) => Num::inexact_complex(a - b),
+            Pair::RealComplex(a, b) => Num::inexact_complex(a - b),
             Pair::Inexact(a, b) => Num::inexact_complex(a - b),
         }
     }
@@ -37,6 +41,8 @@ impl Num {
             Pair::Rat(a, b) => Num::from_ratio(a * b),
             Pair::Flo(a, b) => Num::flo(a * b),
             Pair::Exact(a, b) => Num::from_exact_complex(a * b),
+            Pair::ComplexReal(a, b) => Num::inexact_complex(a * b),
+            Pair::RealComplex(a, b) => Num::inexact_complex(a * b),
             Pair::Inexact(a, b) => Num::inexact_complex(a * b),
         }
     }
@@ -54,6 +60,8 @@ impl Num {
             Pair::Rat(a, b) => Ok(Num::from_ratio(a / b)),
             Pair::Flo(a, b) => Ok(Num::flo(a / b)),
             Pair::Exact(a, b) => Ok(Num::from_exact_complex(a / b)),
+            Pair::ComplexReal(a, b) => Ok(Num::inexact_complex(a / b)),
+            Pair::RealComplex(a, b) => Ok(Num::inexact_complex(a / b)),
             Pair::Inexact(a, b) => Ok(Num::inexact_complex(a / b)),
         }
     }
@@ -173,6 +181,11 @@ enum Pair<'a> {
     Rat(BigRational, BigRational),
     Flo(f64, f64),
     Exact(Complex<BigRational>, Complex<BigRational>),
+    /// An inexact result from a complex and a real, in operand order. The real stays a
+    /// scalar: lifting it to `x+0i` would turn an infinite part into NaN (`inf * 0`) and a
+    /// `-0.0` imaginary part into `+0.0`.
+    ComplexReal(Complex<f64>, f64),
+    RealComplex(f64, Complex<f64>),
     Inexact(Complex<f64>, Complex<f64>),
 }
 
@@ -190,7 +203,11 @@ impl<'a> Pair<'a> {
         if let (Some(x), Some(y)) = (a.to_exact_complex(), b.to_exact_complex()) {
             return Pair::Exact(x, y);
         }
-        Pair::Inexact(a.to_inexact_complex(), b.to_inexact_complex())
+        match (a.to_f64(), b.to_f64()) {
+            (None, Some(y)) => Pair::ComplexReal(a.to_inexact_complex(), y),
+            (Some(x), None) => Pair::RealComplex(x, b.to_inexact_complex()),
+            _ => Pair::Inexact(a.to_inexact_complex(), b.to_inexact_complex()),
+        }
     }
 }
 
@@ -329,5 +346,28 @@ mod tests {
         );
         assert!(Num::flo(f64::NAN).max(&Num::int(1)).unwrap().is_nan());
         assert!(Num::int(1).min(&Num::flo(f64::NAN)).unwrap().is_nan());
+    }
+
+    #[test]
+    fn a_real_with_an_inexact_complex_is_a_scalar() {
+        let flo = Num::flo;
+        let c = |re: Num, im: Num| Num::rectangular(&re, &im).unwrap();
+        let inf_plus_i = c(flo(f64::INFINITY), flo(1.0));
+        assert_eq!(
+            Num::int(2).mul(&inf_plus_i),
+            c(flo(f64::INFINITY), flo(2.0))
+        );
+        assert_eq!(
+            inf_plus_i.div(&Num::int(2)),
+            Ok(c(flo(f64::INFINITY), flo(0.5)))
+        );
+        assert!(matches!(
+            Num::int(1).add(&Num::inexact_complex(Complex::new(0.0, -0.0))),
+            Num::InexactComplex(z) if z.re == 1.0 && z.im.is_sign_negative()
+        ));
+        assert!(matches!(
+            Num::flo(2.0).sub(&c(flo(1.0), flo(f64::NAN))),
+            Num::InexactComplex(z) if z.re == 1.0 && z.im.is_nan()
+        ));
     }
 }
