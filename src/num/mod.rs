@@ -8,6 +8,7 @@
 //! can panic on user data.
 
 mod arith;
+mod integer;
 
 use std::cmp::Ordering;
 
