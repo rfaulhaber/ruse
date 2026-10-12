@@ -82,7 +82,7 @@ fn atom(heap: &Heap, v: Value, style: Style, out: &mut String) {
         return;
     }
     if let Some(x) = v.as_flonum() {
-        out.push_str(&flonum_text(x));
+        out.push_str(&crate::num::print::flonum_text(x));
         return;
     }
     if let Some(c) = v.as_char() {
@@ -167,29 +167,6 @@ fn atom(heap: &Heap, v: Value, style: Style, out: &mut String) {
     }
 }
 
-/// R7RS external representation of an inexact real: always distinguishable from an exact
-/// integer, so `1.0` never prints as `1`.
-fn flonum_text(x: f64) -> String {
-    if x.is_nan() {
-        return "+nan.0".to_string();
-    }
-    if x.is_infinite() {
-        return if x > 0.0 { "+inf.0" } else { "-inf.0" }.to_string();
-    }
-    // Rust's `Display` never uses scientific notation, so 1e300 would print as three
-    // hundred digits; switch to it outside a readable magnitude band.
-    let s = if x != 0.0 && (x.abs() < 1e-10 || x.abs() >= 1e21) {
-        format!("{x:e}")
-    } else {
-        format!("{x}")
-    };
-    if s.contains(['.', 'e', 'E']) {
-        s
-    } else {
-        format!("{s}.0")
-    }
-}
-
 fn char_literal(c: char) -> String {
     // The R7RS §6.6 character names.
     let name = match c {
@@ -252,7 +229,7 @@ mod tests {
         assert_eq!(wr(&heap, Value::flonum(1.0)), "1.0");
         assert_eq!(wr(&heap, Value::flonum(-0.5)), "-0.5");
         assert_eq!(wr(&heap, Value::flonum(-0.0)), "-0.0");
-        assert_eq!(wr(&heap, Value::flonum(1e300)), "1e300");
+        assert_eq!(wr(&heap, Value::flonum(1e300)), "1.0e+300");
         assert_eq!(wr(&heap, Value::flonum(f64::NAN)), "+nan.0");
         assert_eq!(wr(&heap, Value::flonum(f64::INFINITY)), "+inf.0");
         assert_eq!(wr(&heap, Value::flonum(f64::NEG_INFINITY)), "-inf.0");
