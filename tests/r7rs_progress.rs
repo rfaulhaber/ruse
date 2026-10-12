@@ -234,12 +234,33 @@ mod split_forms_tests {
 /// Evaluated before the suite, one form at a time, so the suite's own `(test expected
 /// actual)` harness has something to tally into. This dogfoods the evaluator: `test` is
 /// itself Scheme, threading state through `set!` on top-level globals rather than through
-/// any native support the harness would otherwise need.
+/// any native support the harness would otherwise need. Equality is chibi's `test-equal?`,
+/// the comparator the suite was written against: an inexact real expectation tolerates a
+/// relative error below `current-test-epsilon`, and a complex one is compared part by part.
 const SHIM: &str = "
 (define tests-passed 0)
 (define tests-failed 0)
+(define current-test-epsilon 1e-5)
+(define (approx-equal? a b epsilon)
+  (cond
+   ((> (abs a) (abs b))
+    (approx-equal? b a epsilon))
+   ((zero? a)
+    (< (abs b) epsilon))
+   (else
+    (< (abs (/ (- a b) b)) epsilon))))
+(define (test-equal? expect res)
+  (or (equal? expect res)
+      (if (real? expect)
+          (and (inexact? expect)
+               (real? res)
+               (approx-equal? expect res current-test-epsilon))
+          (and (complex? res)
+               (complex? expect)
+               (test-equal? (real-part expect) (real-part res))
+               (test-equal? (imag-part expect) (imag-part res))))))
 (define (test expected actual)
-  (if (equal? expected actual)
+  (if (test-equal? expected actual)
       (set! tests-passed (+ tests-passed 1))
       (begin
         (set! tests-failed (+ tests-failed 1))
@@ -254,9 +275,9 @@ const SHIM: &str = "
 
 /// The suite ratchet, not a target — bump it when a later milestone makes more of the
 /// suite runnable, never lower it. 115 was M3's language slice; 156 is M4's (closures,
-/// derived forms, variadics, quasiquote); 290 is M5's (the numeric tower and its
-/// procedures).
-const MIN_PASSED: i64 = 290;
+/// derived forms, variadics, quasiquote); 333 is M5's (the numeric tower, its procedures
+/// and chibi's comparator for the inexact results).
+const MIN_PASSED: i64 = 333;
 
 #[test]
 fn r7rs_suite_slice() {

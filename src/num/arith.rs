@@ -141,7 +141,7 @@ impl Num {
     }
 
     /// The real and imaginary parts, a real number having an exact-zero imaginary part.
-    fn parts(&self) -> (Num, Num) {
+    pub(super) fn parts(&self) -> (Num, Num) {
         match self {
             Num::ExactComplex(c) => (Num::from_ratio(c.re.clone()), Num::from_ratio(c.im.clone())),
             Num::InexactComplex(c) => (Num::flo(c.re), Num::flo(c.im)),
@@ -164,7 +164,7 @@ impl Num {
         }
     }
 
-    fn to_inexact_complex(&self) -> Complex<f64> {
+    pub(super) fn to_inexact_complex(&self) -> Complex<f64> {
         match self {
             Num::Int(i) => Complex::new(int_to_f64(i), 0.0),
             Num::Rat(r) => Complex::new(ratio_to_f64(r), 0.0),

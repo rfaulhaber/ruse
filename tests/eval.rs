@@ -898,3 +898,30 @@ fn numeric_natives_check_what_the_tower_cannot_see() {
     assert_eq!(show(&mut vm, "(gcd -4)"), "4");
     assert_eq!(show(&mut vm, "(max 2/3)"), "2/3");
 }
+
+#[test]
+fn transcendental_and_complex_procedures() {
+    let mut vm = vm();
+    for (src, expect) in [
+        ("(sqrt -4)", "+2i"),
+        ("(inexact (sqrt -1))", "0.0+1.0i"),
+        ("(expt 2 100)", "1267650600228229401496703205376"),
+        ("(expt 0.0 0)", "1.0"),
+        ("(exp 0)", "1.0"),
+        ("(log 8 2)", "3.0"),
+        ("(atan -0.0 1.0)", "-0.0"),
+        ("(make-rectangular 1 2)", "1+2i"),
+        ("(make-rectangular 1 2.0)", "1.0+2.0i"),
+        ("(make-polar 1 0)", "1"),
+        ("(real-part 1+2i)", "1"),
+        ("(imag-part 3)", "0"),
+        ("(magnitude 3+4i)", "5"),
+        ("(angle -1)", "3.141592653589793"),
+    ] {
+        assert_eq!(show(&mut vm, src), expect, "{src}");
+    }
+    assert!(matches!(
+        vm_kind(&eval_err(&mut vm, "(expt 2 4294967296)")),
+        VmErrorKind::NumericDomain { op: "expt", .. }
+    ));
+}

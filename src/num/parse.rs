@@ -71,7 +71,8 @@ struct Reader {
 }
 
 impl Reader {
-    /// `<real>`, `<real> <imaginary>` or `<imaginary>`, consuming all of `s`.
+    /// `<real>`, `<real> <imaginary>`, `<imaginary>` or `<real>@<real>`, consuming all of
+    /// `s`.
     fn complex(&self, s: &[u8]) -> Option<Num> {
         if let Some(im) = self.imaginary(s) {
             return Num::rectangular(&Num::int(0), &im).ok();
@@ -79,6 +80,12 @@ impl Reader {
         let (re, rest) = self.real(s)?;
         if rest.is_empty() {
             return Some(re);
+        }
+        if let [b'@', angle @ ..] = rest {
+            return match self.real(angle)? {
+                (angle, []) => Num::polar(&re, &angle).ok(),
+                _ => None,
+            };
         }
         let im = self.imaginary(rest)?;
         Num::rectangular(&re, &im).ok()

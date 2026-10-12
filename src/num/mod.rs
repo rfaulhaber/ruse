@@ -11,6 +11,7 @@ mod arith;
 mod integer;
 mod parse;
 pub(crate) mod print;
+mod transcend;
 
 use std::cmp::Ordering;
 
@@ -132,6 +133,21 @@ impl Num {
                 (Some(re), Some(im)) => Ok(Num::inexact_complex(Complex::new(re, im))),
                 _ => Err(NumError::NotReal),
             },
+        }
+    }
+
+    /// `make-polar`. An exact-zero angle leaves the magnitude as it is, exactness included:
+    /// `(make-polar 1 0)` is `1`. Any other angle makes the result an inexact complex.
+    pub fn polar(magnitude: &Num, angle: &Num) -> NumResult {
+        if !magnitude.is_real() || !angle.is_real() {
+            return Err(NumError::NotReal);
+        }
+        if angle.is_exact() && angle.is_zero() {
+            return Ok(magnitude.clone());
+        }
+        match (magnitude.to_f64(), angle.to_f64()) {
+            (Some(m), Some(a)) => Ok(Num::inexact_complex(Complex::from_polar(m, a))),
+            _ => Err(NumError::NotReal),
         }
     }
 

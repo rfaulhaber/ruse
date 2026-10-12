@@ -59,6 +59,22 @@ pub(crate) const DEFS: &[(&str, usize, Option<usize>, NativeFn)] = &[
     ("inexact->exact", 1, Some(1), n_exact),
     ("number->string", 1, Some(2), n_number_to_string),
     ("string->number", 1, Some(2), n_string_to_number),
+    ("exp", 1, Some(1), n_exp),
+    ("log", 1, Some(2), n_log),
+    ("sin", 1, Some(1), n_sin),
+    ("cos", 1, Some(1), n_cos),
+    ("tan", 1, Some(1), n_tan),
+    ("asin", 1, Some(1), n_asin),
+    ("acos", 1, Some(1), n_acos),
+    ("atan", 1, Some(2), n_atan),
+    ("sqrt", 1, Some(1), n_sqrt),
+    ("expt", 2, Some(2), n_expt),
+    ("make-rectangular", 2, Some(2), n_make_rectangular),
+    ("make-polar", 2, Some(2), n_make_polar),
+    ("real-part", 1, Some(1), n_real_part),
+    ("imag-part", 1, Some(1), n_imag_part),
+    ("magnitude", 1, Some(1), n_magnitude),
+    ("angle", 1, Some(1), n_angle),
 ];
 
 // ---------------------------------------------------------------- predicates
@@ -286,6 +302,82 @@ fn n_exact(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
 /// Also the body of `exact->inexact`.
 fn n_inexact(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
     unary(ctx.heap, "inexact", arg(args, 0), |x| Ok(x.inexact()))
+}
+
+// ---------------------------------------------------------------- transcendentals and complex
+
+fn n_exp(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "exp", arg(args, 0), |x| Ok(x.exp()))
+}
+
+/// `(log z)` is the natural logarithm, `(log z base)` the quotient of two.
+fn n_log(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    match args.get(1) {
+        Some(&base) => binary(ctx.heap, "log", arg(args, 0), base, Num::log_base),
+        None => unary(ctx.heap, "log", arg(args, 0), Num::log),
+    }
+}
+
+fn n_sin(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "sin", arg(args, 0), |x| Ok(x.sin()))
+}
+
+fn n_cos(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "cos", arg(args, 0), |x| Ok(x.cos()))
+}
+
+fn n_tan(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "tan", arg(args, 0), |x| Ok(x.tan()))
+}
+
+fn n_asin(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "asin", arg(args, 0), |x| Ok(x.asin()))
+}
+
+fn n_acos(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "acos", arg(args, 0), |x| Ok(x.acos()))
+}
+
+/// `(atan z)` is the arctangent, `(atan y x)` the angle of the point `(x, y)`.
+fn n_atan(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    match args.get(1) {
+        Some(&x) => binary(ctx.heap, "atan", arg(args, 0), x, Num::atan2),
+        None => unary(ctx.heap, "atan", arg(args, 0), |y| Ok(y.atan())),
+    }
+}
+
+fn n_sqrt(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "sqrt", arg(args, 0), |x| Ok(x.sqrt()))
+}
+
+fn n_expt(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    binary(ctx.heap, "expt", arg(args, 0), arg(args, 1), Num::expt)
+}
+
+fn n_make_rectangular(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    let (re, im) = (arg(args, 0), arg(args, 1));
+    binary(ctx.heap, "make-rectangular", re, im, Num::rectangular)
+}
+
+fn n_make_polar(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    let (magnitude, angle) = (arg(args, 0), arg(args, 1));
+    binary(ctx.heap, "make-polar", magnitude, angle, Num::polar)
+}
+
+fn n_real_part(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "real-part", arg(args, 0), |x| Ok(x.real_part()))
+}
+
+fn n_imag_part(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "imag-part", arg(args, 0), |x| Ok(x.imag_part()))
+}
+
+fn n_magnitude(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "magnitude", arg(args, 0), |x| Ok(x.magnitude()))
+}
+
+fn n_angle(ctx: &mut NativeCtx<'_>, args: &[Value]) -> Result<Value, VmError> {
+    unary(ctx.heap, "angle", arg(args, 0), |x| Ok(x.angle()))
 }
 
 // ---------------------------------------------------------------- string conversion
