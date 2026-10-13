@@ -19,6 +19,12 @@
 //!   IEEE: `(expt 0.0 -1)` is `+inf.0`.
 //! - A negative base under a fractional exponent is complex: `(expt -8 1/3)`, where chibi
 //!   answers `+nan.0`.
+//! - `asin` and `acos` ignore the sign of a zero imaginary part, as `sqrt` does, so
+//!   `(asin 2.0+0.0i)`, `(asin 2.0-0.0i)` and `(asin 2.0)` agree, on the side of the cut that
+//!   is continuous with the fourth quadrant above 1 and with the second below -1. `atan` still
+//!   follows num-complex, which ignores the sign of a zero *real* part on its cuts instead:
+//!   `(atan 0.0-2.0i)` and `(atan -0.0-2.0i)` both answer `-π/2`, where chibi and C99 answer
+//!   `+π/2` and `-π/2`. That deviation is recorded in `tests/chibi_diff.rs`.
 
 use std::cmp::Ordering;
 use std::f64::consts::{FRAC_PI_2, LN_2, PI};
@@ -191,7 +197,12 @@ impl Num {
         beyond: fn(f64) -> Complex<f64>,
         complex: fn(Complex<f64>) -> Complex<f64>,
     ) -> Num {
-        match self.to_f64() {
+        // A complex argument with a zero imaginary part, of either sign, is on the real axis.
+        let on_real_axis = match self {
+            Num::InexactComplex(z) if z.im == 0.0 => Some(z.re),
+            _ => self.to_f64(),
+        };
+        match on_real_axis {
             Some(x) if x.abs() > 1.0 => Num::inexact_complex(beyond(x)),
             _ => self.transcendental(real, complex),
         }
@@ -257,11 +268,13 @@ fn complex_sqrt(mut z: Complex<f64>) -> Num {
     Num::inexact_complex(z.sqrt())
 }
 
-/// `asin` of a non-real number by Kahan's formulas. `Complex::asin` evaluates
+/// `asin` of a number off the real axis by Kahan's formulas. `Complex::asin` evaluates
 /// `-i ln(iz + sqrt(1 - z²))`, whose terms cancel away the digits of the answer once `|z|`
 /// passes about `1e5` and make a NaN of it past `1e8`; pairing the square roots of `1 - z` and
-/// `1 + z` keeps every digit, and the signed zero of an imaginary part still picks the side of
-/// the branch cut.
+/// `1 + z` keeps every digit. The formulas are not used on the real axis, where they would
+/// read a zero imaginary part of either sign as `+0.0` in `1 - z` (num-complex subtracts
+/// `0.0 - z.im`) and `asin(-z)` would stop being `-asin(z)`; `Num::arc` sends it to
+/// [`asin_beyond_unit`] instead.
 fn complex_asin(z: Complex<f64>) -> Complex<f64> {
     let (a, b) = ((1.0 - z).sqrt(), (1.0 + z).sqrt());
     Complex::new(z.re.atan2((a * b).re), (a.conj() * b).im.asinh())
@@ -274,8 +287,8 @@ fn complex_acos(z: Complex<f64>) -> Complex<f64> {
 }
 
 /// `asin` of a real outside `[-1, 1]` in closed form, with the imaginary part negative for a
-/// positive argument as `(asin 2)` has it. A real argument has an exact-zero imaginary part,
-/// which Kahan's formulas would read as `+0.0` and put on the upper side of the cut.
+/// positive argument as `(asin 2)` has it. It also answers a complex argument whose imaginary
+/// part is `+0.0` or `-0.0`, so the sign of that zero cannot pick the side of the cut.
 fn asin_beyond_unit(x: f64) -> Complex<f64> {
     Complex::new(FRAC_PI_2.copysign(x), -acosh(x.abs()).copysign(x))
 }
@@ -427,9 +440,13 @@ mod tests {
 
     // The references are Python's `cmath.asin` and `cmath.acos`, which use an unrelated
     // algorithm. The tolerance is far below the digits `Complex::asin` loses at 1e5 and
-    // above, and loose enough for Miri's few-ulp perturbation of `atan2` and `asinh`.
+    // above, and loose enough for Miri's few-ulp perturbation of `atan2` and `asinh`. It is
+    // absolute for a small part (1e-12 times the larger of 1 and the part), so a part many
+    // orders below the other, such as the 2.5e-10 real part of `acos` at `1e10+2.5i`, is only
+    // checked that closely: from |z| of about 1e10 the polar-form square root in
+    // `Complex::sqrt` costs `acos` digits there, a known limit.
     #[test]
-    fn asin_and_acos_of_a_complex_argument_keep_their_digits_at_any_magnitude() {
+    fn asin_and_acos_of_a_complex_argument_keep_their_digits_where_the_library_loses_them() {
         let cases = [
             (
                 (1e10, 2.5),
@@ -474,6 +491,32 @@ mod tests {
             assert!(close(z.asin(), asin), "asin of {re}{im:+}i");
             assert!(close(z.acos(), acos), "acos of {re}{im:+}i");
         }
+    }
+
+    // Miri perturbs each transcendental call on its own, so two calls on the same argument
+    // differ in the last bits and this test's bitwise comparison cannot hold.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_zero_imaginary_part_of_either_sign_leaves_asin_and_acos_on_the_real_axis() {
+        for re in [2.0, -2.0] {
+            let real_asin = Num::flo(re).asin();
+            let real_acos = Num::flo(re).acos();
+            for im in [0.0, -0.0] {
+                let z = c(Num::flo(re), Num::flo(im));
+                assert_eq!(z.asin(), real_asin, "asin of {re}{im:+}i");
+                assert_eq!(z.acos(), real_acos, "acos of {re}{im:+}i");
+            }
+        }
+        // And the side of the cut is the one the real argument has: below for x > 1, above
+        // for x < -1.
+        assert!(matches!(
+            Num::flo(2.0).asin(),
+            Num::InexactComplex(z) if z.im < 0.0
+        ));
+        assert!(matches!(
+            Num::flo(-2.0).asin(),
+            Num::InexactComplex(z) if z.im > 0.0
+        ));
     }
 
     #[test]

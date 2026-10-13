@@ -486,11 +486,12 @@ const DIVERGENCES: &[Divergence] = &[
         applies: exact_complex_integer_power,
     },
     Divergence {
-        shape: "`magnitude`, `log`, `sqrt`, `asin`, `acos`, `atan`, `expt` or a complex `/` on a \
-                number beyond 1e154 or below 1e-154",
-        reason: "chibi's modulus is sqrt(re² + im²), which overflows to +inf.0 above 1e154 and \
-                 underflows to 0.0 below 1e-154 ((magnitude 6.5e-306) is 0.0), and its complex \
-                 functions do likewise; ruse scales the computation",
+        shape: "`magnitude`, a negative or complex `log`, or `sqrt`, `asin`, `acos`, `atan`, \
+                `expt` or `/` of a complex number, beyond 1e154 or below 1e-154",
+        reason: "chibi's modulus, which it applies to a real too, is sqrt(re² + im²): it \
+                 overflows to +inf.0 above 1e154 and underflows to 0.0 below 1e-154 \
+                 ((magnitude 6.5e-306) is 0.0), and its complex functions do likewise; ruse \
+                 scales the computation",
         applies: operand_far_from_one,
     },
     Divergence {
@@ -504,8 +505,10 @@ const DIVERGENCES: &[Divergence] = &[
         shape: "`asin` or `acos` of a large real",
         reason: "chibi loses digits for a negative real below about -1e5 (a relative error of \
                  1e-7 there, 6e-5 at -2.4e6, which `exp` and `tan` magnify; (asin -1e8) is \
-                 0.0+inf.0i) and is wrong for an exact integer above 2^31 ((asin 3000000000) \
-                 is 0.785-22.2i); ruse uses the closed form",
+                 0.0+inf.0i), is wrong for an exact integer above 2^31 ((asin 3000000000) is \
+                 0.785-22.2i) and overflows squaring a real above 1e154 ((asin 1e308) has \
+                 imaginary part -inf.0, the right one is -709.889355822726); ruse uses the \
+                 closed form",
         applies: arc_of_large_real,
     },
     Divergence {
@@ -565,8 +568,9 @@ const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         shape: "`sin`, `cos` or `tan` of an exact number above 2^53",
-        reason: "an ulp of such an argument is more than 2π, and chibi's conversion of a bignum \
-                 or ratio to a flonum is not correctly rounded ((inexact \
+        reason: "an ulp of such an argument is 2 or more, and from 2^55 more than 2π, so a \
+                 one-ulp difference is a different angle, and chibi's conversion of a bignum or \
+                 ratio to a flonum is not correctly rounded ((inexact \
                  -98765432109876543210987654321098765432.75) is -9.876543210987655e37, the \
                  correctly rounded value is -9.876543210987653e37)",
         applies: trig_of_large_exact,
@@ -833,19 +837,23 @@ fn non_finite_complex_power(case: &Case) -> bool {
 }
 
 fn operand_far_from_one(case: &Case) -> bool {
-    let far = |arg: &Expr| {
-        case.operand_is(arg, |n| {
-            [n.real_part(), n.imag_part()].iter().any(|part| {
-                part.to_f64()
-                    .is_some_and(|x| x != 0.0 && !(1e-154..=1e154).contains(&x.abs()))
-            })
+    let far = |n: &Num| {
+        [n.real_part(), n.imag_part()].iter().any(|part| {
+            part.to_f64()
+                .is_some_and(|x| x != 0.0 && !(1e-154..=1e154).contains(&x.abs()))
         })
     };
+    let complex_far = |arg: &Expr| case.operand_is(arg, |n| !n.is_real() && far(n));
     case.expr.any_call(|op, args| match (op, args) {
-        ("magnitude" | "log" | "sqrt" | "asin" | "acos" | "atan", [arg]) => far(arg),
-        ("expt", [base, _]) => far(base),
+        ("magnitude", [arg]) => case.operand_is(arg, far),
+        ("log", [arg]) => case.operand_is(arg, |n| {
+            far(n) && (!n.is_real() || n.sign() == Ok(Some(Ordering::Less)))
+        }),
+        ("sqrt" | "asin" | "acos" | "atan", [arg]) => complex_far(arg),
+        ("expt", [base, _]) => complex_far(base),
         ("/", _) => {
-            args.iter().any(far) && args.iter().any(|a| case.operand_is(a, |n| !n.is_real()))
+            args.iter().any(|a| case.operand_is(a, far))
+                && args.iter().any(|a| case.operand_is(a, |n| !n.is_real()))
         }
         _ => false,
     })
@@ -863,8 +871,9 @@ fn tan_of_large_imaginary_part(case: &Case) -> bool {
 fn arc_of_large_real(case: &Case) -> bool {
     case.expr.any_call(|op, args| match (op, args) {
         ("asin" | "acos", [arg]) => case.operand_is(arg, |n| {
-            n.to_f64()
-                .is_some_and(|x| x < -1e5 || (n.is_exact_integer() && x.abs() > 2f64.powi(31)))
+            n.to_f64().is_some_and(|x| {
+                x < -1e5 || x.abs() > 1e154 || (n.is_exact_integer() && x.abs() > 2f64.powi(31))
+            })
         }),
         _ => false,
     })
@@ -908,7 +917,9 @@ fn awkward_extremum(case: &Case) -> bool {
 }
 
 /// A sqrt call whose argument has a negative real part and a nonzero imaginary part, and
-/// whose ruse root squares back to the argument: chibi's own root is the one that is wrong.
+/// whose ruse root is the principal one (real part positive, or zero with a non-negative
+/// imaginary part) and squares back to the argument: chibi's own root is the one that is
+/// wrong.
 fn sqrt_left_of_the_imaginary_axis(case: &Case) -> bool {
     case.expr
         .subexpressions()
@@ -918,7 +929,17 @@ fn sqrt_left_of_the_imaginary_axis(case: &Case) -> bool {
                 [arg] => case.operand_is(arg, |z| {
                     !z.is_real()
                         && z.real_part().sign() == Ok(Some(Ordering::Less))
-                        && ruse_num(call).is_some_and(|root| agrees(z, &root.mul(&root)))
+                        && ruse_num(call).is_some_and(|root| {
+                            let principal = match root.real_part().sign() {
+                                Ok(Some(Ordering::Greater)) => true,
+                                Ok(Some(Ordering::Equal)) => matches!(
+                                    root.imag_part().sign(),
+                                    Ok(Some(Ordering::Greater | Ordering::Equal))
+                                ),
+                                _ => false,
+                            };
+                            principal && agrees(z, &root.mul(&root))
+                        })
                 }),
                 _ => false,
             },
@@ -956,7 +977,9 @@ fn exact_view_of_transcendental(case: &Case) -> bool {
 }
 
 /// An `asin` or `acos` call whose argument has a part of 100 or more, and whose ruse answer
-/// passes through `sin` (`cos`) back to the argument: chibi's answer is the one that is wrong.
+/// has its real part in the principal range (`[-π/2, π/2]` for `asin`, `[0, π]` for `acos`)
+/// and passes through `sin` (`cos`) back to the argument: chibi's answer is the one that is
+/// wrong.
 fn arc_of_large_complex(case: &Case) -> bool {
     case.expr
         .subexpressions()
@@ -969,12 +992,21 @@ fn arc_of_large_complex(case: &Case) -> bool {
                             .iter()
                             .any(|part| part.to_f64().is_some_and(|x| x.abs() >= 100.0))
                         && ruse_num(call).is_some_and(|answer| {
-                            let back = if *op == "asin" {
-                                answer.sin()
+                            let real_part = answer.real_part().to_f64();
+                            let (principal, back) = if *op == "asin" {
+                                (
+                                    real_part
+                                        .is_some_and(|x| x.abs() <= std::f64::consts::FRAC_PI_2),
+                                    answer.sin(),
+                                )
                             } else {
-                                answer.cos()
+                                (
+                                    real_part
+                                        .is_some_and(|x| (0.0..=std::f64::consts::PI).contains(&x)),
+                                    answer.cos(),
+                                )
                             };
-                            agrees(&z.inexact(), &back)
+                            principal && agrees(&z.inexact(), &back)
                         })
                 }),
                 _ => false,
