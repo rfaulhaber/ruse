@@ -11,7 +11,15 @@ use num_traits::{Signed, Zero};
 use super::{BigInt, BigRational, Complex, Num, NumError, NumResult, int_to_f64, ratio_to_f64};
 
 impl Num {
+    /// An exact zero is the additive identity, so the other operand comes back unchanged:
+    /// promoting the zero to `0.0` first would turn `(+ -0.0 0)` into `0.0`.
     pub fn add(&self, o: &Num) -> Num {
+        if self.is_exact_zero() {
+            return o.clone();
+        }
+        if o.is_exact_zero() {
+            return self.clone();
+        }
         match Pair::of(self, o) {
             Pair::Int(a, b) => Num::Int(a + b),
             Pair::Rat(a, b) => Num::from_ratio(a + b),
@@ -23,7 +31,15 @@ impl Num {
         }
     }
 
+    /// As for [`Num::add`], an exact zero subtrahend leaves the minuend alone, and an exact
+    /// zero minuend is the negated subtrahend.
     pub fn sub(&self, o: &Num) -> Num {
+        if o.is_exact_zero() {
+            return self.clone();
+        }
+        if self.is_exact_zero() {
+            return o.neg();
+        }
         match Pair::of(self, o) {
             Pair::Int(a, b) => Num::Int(a - b),
             Pair::Rat(a, b) => Num::from_ratio(a - b),
@@ -74,6 +90,10 @@ impl Num {
             Num::ExactComplex(c) => Num::ExactComplex(-c),
             Num::InexactComplex(c) => Num::inexact_complex(-c),
         }
+    }
+
+    fn is_exact_zero(&self) -> bool {
+        self.is_exact() && self.is_zero()
     }
 
     pub fn square(&self) -> Num {
@@ -259,6 +279,16 @@ mod tests {
         assert_eq!(third.add(&Num::flo(0.5)), Num::flo(1.0 / 3.0 + 0.5));
         assert_eq!(Num::int(2).mul(&Num::flo(3.5)), Num::flo(7.0));
         assert!(matches!(Num::flo(-0.0).neg(), Num::Flo(x) if x == 0.0 && x.is_sign_positive()));
+        // An exact zero is the additive identity and carries no sign of its own.
+        let negative_zero = |n: Num| matches!(n, Num::Flo(x) if x == 0.0 && x.is_sign_negative());
+        assert!(negative_zero(Num::flo(-0.0).add(&Num::int(0))));
+        assert!(negative_zero(Num::int(0).add(&Num::flo(-0.0))));
+        assert!(negative_zero(Num::flo(-0.0).sub(&Num::int(0))));
+        assert!(negative_zero(Num::int(0).sub(&Num::flo(0.0))));
+        assert_eq!(
+            Num::int(0).sub(&third),
+            Num::rational((-1).into(), 3.into()).unwrap()
+        );
         assert!(matches!(Num::int(-1).mul(&Num::flo(0.0)), Num::Flo(x) if x.is_sign_negative()));
         let big = Num::int(BigInt::from(2).pow(100));
         assert_eq!(big.sub(&big), Num::int(0));

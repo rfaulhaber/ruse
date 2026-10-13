@@ -24,9 +24,9 @@
 #![allow(clippy::panic)]
 #![allow(clippy::print_stdout)]
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -38,7 +38,7 @@ use proptest::prelude::*;
 use proptest::sample::select;
 use proptest::test_runner::{Config, TestError, TestRunner};
 use ruse::Vm;
-use ruse::num::Num;
+use ruse::num::{BigInt, Num};
 
 /// chibi 0.12 segfaults on some inputs and could loop on others; a run that outlives this
 /// counts as a crash.
@@ -375,9 +375,66 @@ fn ruse_num(expr: &Expr) -> Option<Num> {
     }
 }
 
-/// Whether ruse evaluates `expr` to a number satisfying `test`.
-fn ruse_num_is(expr: &Expr, test: impl FnOnce(&Num) -> bool) -> bool {
-    ruse_num(expr).is_some_and(|n| test(&n))
+/// What a divergence predicate sees: the disagreeing expression and, computed on first use,
+/// chibi's value for each of its non-literal sub-expressions. A predicate classifies an
+/// operand from its literal text or from chibi's value, never from ruse's answer, so a ruse
+/// bug cannot talk the test into excusing it.
+struct Case<'a> {
+    expr: &'a Expr,
+    chibi_values: OnceCell<HashMap<String, Num>>,
+}
+
+impl<'a> Case<'a> {
+    fn new(expr: &'a Expr) -> Self {
+        Case {
+            expr,
+            chibi_values: OnceCell::new(),
+        }
+    }
+
+    /// The value of an operand: what its text reads as if it is a literal, otherwise what
+    /// chibi evaluates it to (nothing if chibi errors on it).
+    fn operand(&self, operand: &Expr) -> Option<Num> {
+        match operand {
+            Expr::Literal(text) => Num::parse(text, 10),
+            Expr::Call(..) => self
+                .chibi_values
+                .get_or_init(|| chibi_values(self.expr))
+                .get(&operand.to_string())
+                .cloned(),
+        }
+    }
+
+    /// Whether the operand's value satisfies `test`.
+    fn operand_is(&self, operand: &Expr, test: impl FnOnce(&Num) -> bool) -> bool {
+        self.operand(operand).is_some_and(|n| test(&n))
+    }
+}
+
+/// chibi's value for every distinct non-literal sub-expression of `expr`, all from one run.
+/// A sub-expression chibi cannot evaluate, or whose value is not a number, is left out.
+fn chibi_values(expr: &Expr) -> HashMap<String, Num> {
+    let mut texts: Vec<String> = expr
+        .subexpressions()
+        .into_iter()
+        .filter(|e| matches!(e, Expr::Call(..)))
+        .map(Expr::to_string)
+        .collect();
+    texts.sort();
+    texts.dedup();
+    let guarded: String = texts
+        .iter()
+        .map(|text| format!(" (guard (e (#t #f)) {text})"))
+        .collect();
+    let Outcome::Value(answers) = chibi_run(&format!("(list{guarded})")) else {
+        return HashMap::new();
+    };
+    let answers = answers.trim_start_matches('(').trim_end_matches(')');
+    texts
+        .into_iter()
+        .zip(answers.split_whitespace())
+        .filter_map(|(text, answer)| Some((text, parse_answer(answer)?)))
+        .collect()
 }
 
 fn is_inexact_zero(n: &Num) -> bool {
@@ -388,14 +445,13 @@ fn is_inexact_zero(n: &Num) -> bool {
 struct Divergence {
     shape: &'static str,
     reason: &'static str,
-    /// Whether the expression has the shape. It runs only on an expression the two
-    /// implementations disagree about, so it may evaluate sub-expressions.
-    applies: fn(&Expr) -> bool,
+    /// Whether the case has the shape. It runs only on an expression the two implementations
+    /// disagree about, so it may ask chibi about the expression's operands.
+    applies: fn(&Case) -> bool,
 }
 
 /// Disagreements on a matching expression are excused, so each entry has to say why the
-/// difference is acceptable: nearly always a chibi bug or extension, once an accuracy limit
-/// ruse shares.
+/// difference is acceptable: a chibi bug or extension, or a choice R7RS leaves open.
 const DIVERGENCES: &[Divergence] = &[
     Divergence {
         shape: "`expt` of a negative real to a non-integer power",
@@ -415,19 +471,27 @@ const DIVERGENCES: &[Divergence] = &[
         applies: exact_zero_to_awkward_power,
     },
     Divergence {
-        shape: "`expt` of a complex number to an integer power",
-        reason: "ruse keeps an exact base exact and multiplies an inexact one; chibi computes \
-                 in flonums, evidently through the polar form. (expt 1+2i 2) is -3+4i against \
-                 -3.0+4.000000000000002i, a part that should vanish is rounding noise of a \
-                 different size, and infinite parts turn into different NaNs",
-        applies: complex_integer_power,
+        shape: "`expt` of a complex zero or of a complex number with a non-finite part",
+        reason: "the answer divides by zero or multiplies infinities, and the infinities and \
+                 NaNs left depend on the algorithm: ruse multiplies, chibi goes through the polar \
+                 form ((expt +inf.0+inf.0i 2) is +inf.0+nan.0i in ruse, +inf.0+inf.0i in chibi)",
+        applies: non_finite_complex_power,
     },
     Divergence {
-        shape: "`magnitude`, `log`, `sqrt`, `asin`, `acos`, `atan` or a complex `/` on a number \
-                near the float limit",
-        reason: "chibi's modulus is sqrt(re² + im²), and its complex functions overflow to \
-                 +inf.0 or NaN in the same way above 1e154; ruse scales the computation",
-        applies: operand_near_float_limit,
+        shape: "`expt` of an exact complex number to an integer power",
+        reason: "ruse's answer is exact and equals the repeated product; chibi computes in \
+                 flonums, evidently through the polar form, which loses a small part entirely \
+                 (a part of 5e-114 comes out as 2.5e-92). The case is excused only if the \
+                 repeated product reproduces ruse's answer",
+        applies: exact_complex_integer_power,
+    },
+    Divergence {
+        shape: "`magnitude`, `log`, `sqrt`, `asin`, `acos`, `atan`, `expt` or a complex `/` on a \
+                number beyond 1e154 or below 1e-154",
+        reason: "chibi's modulus is sqrt(re² + im²), which overflows to +inf.0 above 1e154 and \
+                 underflows to 0.0 below 1e-154 ((magnitude 6.5e-306) is 0.0), and its complex \
+                 functions do likewise; ruse scales the computation",
+        applies: operand_far_from_one,
     },
     Divergence {
         shape: "`tan` of a number with a large imaginary part",
@@ -437,14 +501,20 @@ const DIVERGENCES: &[Divergence] = &[
         applies: tan_of_large_imaginary_part,
     },
     Divergence {
-        shape: "`asin` or `acos` of a number of large magnitude",
+        shape: "`asin` or `acos` of a large real",
         reason: "chibi loses digits for a negative real below about -1e5 (a relative error of \
                  1e-7 there, 6e-5 at -2.4e6, which `exp` and `tan` magnify; (asin -1e8) is \
-                 0.0+inf.0i), is wrong for an exact integer above 2^31 ((asin 3000000000) is \
-                 0.785-22.2i) and for a complex argument above about 1e5; ruse has the closed \
-                 form for a real, but `Complex::asin` and `acos` cancel away digits for a \
-                 complex argument that large",
-        applies: arc_of_large_argument,
+                 0.0+inf.0i) and is wrong for an exact integer above 2^31 ((asin 3000000000) \
+                 is 0.785-22.2i); ruse uses the closed form",
+        applies: arc_of_large_real,
+    },
+    Divergence {
+        shape: "`asin` or `acos` of a complex number with a part of 100 or more",
+        reason: "chibi cancels away the digits of the smaller part ((acos 540.913-2.076105e-5i) \
+                 has real part 3.8504e-8 there; 3.83815612e-8 is right, as Python's `cmath` \
+                 agrees) and answers nonsense from about 1e5. The case is excused only if ruse's \
+                 answer passes through `sin` (`cos` for `acos`) back to the argument",
+        applies: arc_of_large_complex,
     },
     Divergence {
         shape: "`sqrt` of an exact integer below -2^62",
@@ -457,6 +527,14 @@ const DIVERGENCES: &[Divergence] = &[
         reason: "chibi is wrong for an exact argument with a non-integer part ((atan 2+3/2i) \
                  is 0.67+0.0i); ruse agrees with chibi's own answer for the inexact argument",
         applies: atan_of_exact_complex,
+    },
+    Divergence {
+        shape: "`atan` of a number on its branch cut",
+        reason: "on the imaginary axis beyond ±i the sign of the real part's zero picks the side \
+                 of the cut: chibi, C99 and Python's `cmath` answer +π/2 for 0.0-2.0i and -π/2 \
+                 for -0.0-2.0i, where the `atan` ruse inherits from num-complex answers -π/2 \
+                 for both",
+        applies: atan_on_its_branch_cut,
     },
     Divergence {
         shape: "two-argument `atan` with -0.0 as the second operand",
@@ -475,22 +553,44 @@ const DIVERGENCES: &[Divergence] = &[
     Divergence {
         shape: "`sqrt` of a complex number with a negative real part",
         reason: "chibi's real part comes out as 0.0 when the imaginary part is small against a \
-                 negative real part ((sqrt -9999999969.5-2.5i)), where ruse keeps 1.25e-5",
+                 negative real part ((sqrt -9999999969.5-2.5i)), where ruse keeps 1.25e-5; the \
+                 case is excused only if squaring ruse's root gives the argument back",
         applies: sqrt_left_of_the_imaginary_axis,
     },
     Divergence {
-        shape: "`exact`, `numerator` or `denominator` of a transcendental result",
+        shape: "`denominator` of a flonum below 2^-9",
+        reason: "its denominator is 2^62 or more, which overflows chibi's fixnums ((denominator \
+                 -586.2061e-6) is -4.611686018427388e18)",
+        applies: denominator_of_tiny_flonum,
+    },
+    Divergence {
+        shape: "`sin`, `cos` or `tan` of an exact number above 2^53",
+        reason: "an ulp of such an argument is more than 2π, and chibi's conversion of a bignum \
+                 or ratio to a flonum is not correctly rounded ((inexact \
+                 -98765432109876543210987654321098765432.75) is -9.876543210987655e37, the \
+                 correctly rounded value is -9.876543210987653e37)",
+        applies: trig_of_large_exact,
+    },
+    Divergence {
+        shape: "`/` by an exact zero",
+        reason: "ruse signals an error whatever the dividend (R7RS §6.2.6); chibi does for \
+                 (/ 1.5 0) but answers 0.0 for a zero dividend ((/ 0.0 0))",
+        applies: division_by_exact_zero,
+    },
+    Divergence {
+        shape: "`exact`, `numerator` or `denominator` of a transcendental result or a complex \
+                quotient",
         reason: "they expose the last bits of a flonum, and chibi's complex formulas are not \
                  correctly rounded ((acos -678.6712) has imaginary part 7.213283406471159 there, \
-                 7.213283406527076 in ruse)",
+                 7.213283406527076 in ruse); it also divides an exact ratio by an exact complex \
+                 number in flonums ((/ 1/2 1+2i) is 0.1-0.2i)",
         applies: exact_view_of_transcendental,
     },
     Divergence {
-        shape: "`+`, `-` or `*` with an exact zero operand",
-        reason: "chibi treats an exact 0 as absorbing in `*` ((* 0 +inf.0) is 0) and as an \
-                 identity in `+` and `-` ((+ -0.0 0) is -0.0); ruse promotes it to 0.0 and \
-                 follows IEEE",
-        applies: arithmetic_with_exact_zero,
+        shape: "`*` with an exact zero operand",
+        reason: "R7RS allows either answer; chibi's is an exact 0 even for an infinity or NaN \
+                 ((* 0 +inf.0) is 0), ruse promotes the zero to 0.0 and multiplies as IEEE does",
+        applies: product_with_exact_zero,
     },
     Divergence {
         shape: "`gcd` or `lcm` of operands that differ in exactness",
@@ -539,7 +639,9 @@ const DIVERGENCES: &[Divergence] = &[
         reason: "chibi's reader is not correctly rounded (6.02e23 reads as 6.0200000000000006e23, \
                  #e1.2 as 1199999999999999/1000000000000000) and it converts an exact integer \
                  above 2^53 to a flonum an ulp off ((inexact 10^39) is 1.0000000000000001e39); \
-                 numerator, denominator and sin of a large argument expose the difference",
+                 numerator, denominator and sin of a large argument expose the difference. The \
+                 reference is Rust's `f64::from_str` or the exact digits, and ruse must match \
+                 it",
         applies: chibi_misreads_a_literal,
     },
     Divergence {
@@ -550,142 +652,243 @@ const DIVERGENCES: &[Divergence] = &[
     },
 ];
 
-/// The first divergence the expression falls under, if any.
-fn divergence(expr: &Expr) -> Option<&'static Divergence> {
-    DIVERGENCES.iter().find(|d| (d.applies)(expr))
+/// The first divergence the case falls under, if any.
+fn divergence(case: &Case) -> Option<&'static Divergence> {
+    DIVERGENCES.iter().find(|d| (d.applies)(case))
 }
 
-/// Whether chibi and ruse give a literal of the expression different values, either as read
-/// or after `inexact`. All the probes share one chibi run; a probe chibi cannot evaluate
-/// answers `#f`, which is not a number and so never counts.
-fn chibi_misreads_a_literal(expr: &Expr) -> bool {
-    let probes: Vec<String> = expr
+/// An independent reading of a numeral: `probe` is a chibi expression whose value should be
+/// `reference`, computed without the tower under test.
+struct Reading {
+    probe: String,
+    reference: Num,
+}
+
+/// `[+-]digits[.digits][e[+-]digits]`, split into its sign, digits (the integer and fraction
+/// parts run together), the count of fraction digits, the exponent, and whether it has a
+/// point or an exponent at all. `None` for anything else.
+fn plain_decimal(text: &str) -> Option<(bool, String, i64, i64, bool)> {
+    let (negative, rest) = match text.as_bytes().first()? {
+        b'-' => (true, &text[1..]),
+        b'+' => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let (mantissa, exponent) = match rest.find(['e', 'E']) {
+        Some(at) => (&rest[..at], Some(&rest[at + 1..])),
+        None => (rest, None),
+    };
+    let (whole, fraction) = match mantissa.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (mantissa, None),
+    };
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let fraction_digits = fraction.unwrap_or("");
+    if !digits(whole) || !digits(fraction_digits) || whole.len() + fraction_digits.len() == 0 {
+        return None;
+    }
+    let exponent_value = match exponent {
+        Some(e) => {
+            let unsigned = e.strip_prefix(['+', '-']).unwrap_or(e);
+            if unsigned.is_empty() || !digits(unsigned) {
+                return None;
+            }
+            e.parse::<i64>().ok()?
+        }
+        None => 0,
+    };
+    Some((
+        negative,
+        format!("{whole}{fraction_digits}"),
+        fraction_digits.len() as i64,
+        exponent_value,
+        fraction.is_some() || exponent.is_some(),
+    ))
+}
+
+/// The exact value of a plain decimal numeral, from its digits alone.
+fn exact_decimal(text: &str) -> Option<Num> {
+    let (negative, digits, fraction_len, exponent, _) = plain_decimal(text)?;
+    let scale = exponent - fraction_len;
+    if scale.abs() > 1000 {
+        return None;
+    }
+    let mantissa = BigInt::parse_bytes(digits.as_bytes(), 10)?;
+    let mantissa = if negative { -mantissa } else { mantissa };
+    let power = BigInt::from(10).pow(scale.unsigned_abs() as u32);
+    if scale >= 0 {
+        Some(Num::int(mantissa * power))
+    } else {
+        Num::rational(mantissa, power).ok()
+    }
+}
+
+/// The independent readings available for a literal: a decimal numeral is read by Rust's
+/// correctly rounded `f64::from_str`, an integer is converted by it with `inexact`, and an
+/// `#e` decimal is read from its digits. Other forms have none.
+fn independent_readings(text: &str) -> Vec<Reading> {
+    if let Some(decimal) = text.strip_prefix("#e") {
+        return exact_decimal(decimal)
+            .map(|reference| Reading {
+                probe: text.to_owned(),
+                reference,
+            })
+            .into_iter()
+            .collect();
+    }
+    let Some((_, _, _, _, inexact)) = plain_decimal(text) else {
+        return Vec::new();
+    };
+    let Ok(float) = text.parse::<f64>() else {
+        return Vec::new();
+    };
+    let probe = if inexact {
+        text.to_owned()
+    } else {
+        format!("(inexact {text})")
+    };
+    vec![Reading {
+        probe,
+        reference: Num::flo(float),
+    }]
+}
+
+/// Whether chibi reads or converts a literal of the expression differently from the
+/// independent reading while ruse agrees with it. All the probes share one chibi run; a
+/// probe chibi cannot evaluate answers `#f`, which is not a number and so never counts.
+fn chibi_misreads_a_literal(case: &Case) -> bool {
+    let readings: Vec<Reading> = case
+        .expr
         .subexpressions()
         .into_iter()
         .filter_map(|e| match e {
-            Expr::Literal(text) => Some(text),
+            Expr::Literal(text) => Some(independent_readings(text)),
             Expr::Call(..) => None,
         })
-        .flat_map(|text| [text.clone(), format!("(inexact {text})")])
+        .flatten()
         .collect();
-    let guarded: String = probes
+    if readings.is_empty() {
+        return false;
+    }
+    let guarded: String = readings
         .iter()
-        .map(|probe| format!(" (guard (e (#t #f)) {probe})"))
+        .map(|r| format!(" (guard (e (#t #f)) {})", r.probe))
         .collect();
     let Outcome::Value(answers) = chibi_run(&format!("(list{guarded})")) else {
         return false;
     };
     let answers = answers.trim_start_matches('(').trim_end_matches(')');
-    probes
+    readings
         .iter()
         .zip(answers.split_whitespace())
-        .any(
-            |(probe, chibi)| match (ruse_eval(probe), parse_answer(chibi)) {
-                (Outcome::Value(ruse), Some(chibi)) => {
-                    parse_answer(&ruse).is_some_and(|ruse| !ruse.eqv(&chibi))
-                }
-                _ => false,
-            },
-        )
+        .any(|(reading, chibi)| {
+            let ruse = match ruse_eval(&reading.probe) {
+                Outcome::Value(text) => parse_answer(&text),
+                _ => None,
+            };
+            parse_answer(chibi).is_some_and(|chibi| !chibi.eqv(&reading.reference))
+                && ruse.is_some_and(|ruse| ruse.eqv(&reading.reference))
+        })
 }
 
-fn negative_base_fractional_power(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
+fn negative_base_fractional_power(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
         ("expt", [base, Expr::Literal(exponent)]) => {
             Num::parse(exponent, 10).is_some_and(|n| !n.is_integer())
-                && ruse_num_is(base, |n| n.sign() == Ok(Some(Ordering::Less)))
+                && case.operand_is(base, |n| n.sign() == Ok(Some(Ordering::Less)))
         }
         _ => false,
     })
 }
 
-fn rational_to_negative_power(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
+fn rational_to_negative_power(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
         ("expt", [base, Expr::Literal(exponent)]) => {
             Num::parse(exponent, 10)
                 .is_some_and(|n| n.is_exact_integer() && n.sign() == Ok(Some(Ordering::Less)))
-                && ruse_num_is(base, |n| matches!(n, Num::Rat(_)))
+                && case.operand_is(base, |n| matches!(n, Num::Rat(_)))
         }
         _ => false,
     })
 }
 
-fn exact_zero_to_awkward_power(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
+fn exact_zero_to_awkward_power(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
         ("expt", [base, Expr::Literal(exponent)]) => {
             Num::parse(exponent, 10)
                 .is_some_and(|n| !n.is_integer() || n.sign() == Ok(Some(Ordering::Less)))
-                && ruse_num_is(base, |n| n.is_exact() && n.is_zero())
+                && case.operand_is(base, |n| n.is_exact() && n.is_zero())
         }
         _ => false,
     })
 }
 
-fn complex_integer_power(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("expt", [base, Expr::Literal(exponent)]) => {
-            Num::parse(exponent, 10).is_some_and(|n| n.is_integer())
-                && ruse_num_is(base, |n| !n.is_real())
-        }
+fn non_finite_complex_power(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("expt", [base, _]) => case.operand_is(base, |n| {
+            !n.is_real()
+                && (n.is_zero() || !(n.real_part().is_finite() && n.imag_part().is_finite()))
+        }),
         _ => false,
     })
 }
 
-fn operand_near_float_limit(expr: &Expr) -> bool {
-    let huge = |arg: &Expr| {
-        ruse_num_is(arg, |n| {
-            [n.real_part(), n.imag_part()]
-                .iter()
-                .any(|part| part.to_f64().is_some_and(|x| x.abs() > 1e154))
+fn operand_far_from_one(case: &Case) -> bool {
+    let far = |arg: &Expr| {
+        case.operand_is(arg, |n| {
+            [n.real_part(), n.imag_part()].iter().any(|part| {
+                part.to_f64()
+                    .is_some_and(|x| x != 0.0 && !(1e-154..=1e154).contains(&x.abs()))
+            })
         })
     };
-    expr.any_call(|op, args| match (op, args) {
-        ("magnitude" | "log" | "sqrt" | "asin" | "acos" | "atan", [arg]) => huge(arg),
-        ("/", _) => args.iter().any(huge) && args.iter().any(|a| ruse_num_is(a, |n| !n.is_real())),
+    case.expr.any_call(|op, args| match (op, args) {
+        ("magnitude" | "log" | "sqrt" | "asin" | "acos" | "atan", [arg]) => far(arg),
+        ("expt", [base, _]) => far(base),
+        ("/", _) => {
+            args.iter().any(far) && args.iter().any(|a| case.operand_is(a, |n| !n.is_real()))
+        }
         _ => false,
     })
 }
 
-fn tan_of_large_imaginary_part(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("tan", [arg]) => ruse_num_is(arg, |n| {
+fn tan_of_large_imaginary_part(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("tan", [arg]) => case.operand_is(arg, |n| {
             n.imag_part().to_f64().is_some_and(|y| y.abs() >= 10.0)
         }),
         _ => false,
     })
 }
 
-fn arc_of_large_argument(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("asin" | "acos", [arg]) => ruse_num_is(arg, |n| match n.to_f64() {
-            Some(x) => x < -1e5 || (n.is_exact_integer() && x.abs() > 2f64.powi(31)),
-            None => [n.real_part(), n.imag_part()]
-                .iter()
-                .any(|part| part.to_f64().is_some_and(|x| x.abs() > 1e5)),
+fn arc_of_large_real(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("asin" | "acos", [arg]) => case.operand_is(arg, |n| {
+            n.to_f64()
+                .is_some_and(|x| x < -1e5 || (n.is_exact_integer() && x.abs() > 2f64.powi(31)))
         }),
         _ => false,
     })
 }
 
-fn sqrt_of_negative_bignum(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("sqrt", [arg]) => ruse_num_is(arg, |n| {
+fn sqrt_of_negative_bignum(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("sqrt", [arg]) => case.operand_is(arg, |n| {
             n.is_exact_integer() && n.to_f64().is_some_and(|x| x <= -(2f64.powi(62)))
         }),
         _ => false,
     })
 }
 
-fn atan_of_exact_complex(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("atan", [arg]) => ruse_num_is(arg, |n| matches!(n, Num::ExactComplex(_))),
+fn atan_of_exact_complex(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("atan", [arg]) => case.operand_is(arg, |n| matches!(n, Num::ExactComplex(_))),
         _ => false,
     })
 }
 
-fn atan_with_negative_zero_abscissa(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("atan", [_, x]) => ruse_num_is(
+fn atan_with_negative_zero_abscissa(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("atan", [_, x]) => case.operand_is(
             x,
             |n| matches!(n, Num::Flo(z) if *z == 0.0 && z.is_sign_negative()),
         ),
@@ -693,27 +896,37 @@ fn atan_with_negative_zero_abscissa(expr: &Expr) -> bool {
     })
 }
 
-fn awkward_extremum(expr: &Expr) -> bool {
-    expr.any_call(|op, args| {
-        let exact = |a: &Expr| ruse_num_is(a, |n| n.is_exact());
-        let inexact = |a: &Expr| ruse_num_is(a, |n| !n.is_exact());
+fn awkward_extremum(case: &Case) -> bool {
+    case.expr.any_call(|op, args| {
+        let exact = |a: &Expr| case.operand_is(a, |n| n.is_exact());
+        let inexact = |a: &Expr| case.operand_is(a, |n| !n.is_exact());
         matches!(op, "max" | "min")
-            && (args.iter().any(|a| ruse_num_is(a, Num::is_nan))
-                || args.iter().all(|a| ruse_num_is(a, Num::is_zero))
+            && (args.iter().any(|a| case.operand_is(a, Num::is_nan))
+                || args.iter().all(|a| case.operand_is(a, Num::is_zero))
                 || (args.iter().any(exact) && args.iter().any(inexact)))
     })
 }
 
-fn sqrt_left_of_the_imaginary_axis(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("sqrt", [arg]) => ruse_num_is(arg, |n| {
-            !n.is_real() && n.real_part().sign() == Ok(Some(Ordering::Less))
-        }),
-        _ => false,
-    })
+/// A sqrt call whose argument has a negative real part and a nonzero imaginary part, and
+/// whose ruse root squares back to the argument: chibi's own root is the one that is wrong.
+fn sqrt_left_of_the_imaginary_axis(case: &Case) -> bool {
+    case.expr
+        .subexpressions()
+        .into_iter()
+        .any(|call| match call {
+            Expr::Call("sqrt", args) => match args.as_slice() {
+                [arg] => case.operand_is(arg, |z| {
+                    !z.is_real()
+                        && z.real_part().sign() == Ok(Some(Ordering::Less))
+                        && ruse_num(call).is_some_and(|root| agrees(z, &root.mul(&root)))
+                }),
+                _ => false,
+            },
+            _ => false,
+        })
 }
 
-fn exact_view_of_transcendental(expr: &Expr) -> bool {
+fn exact_view_of_transcendental(case: &Case) -> bool {
     const TRANSCENDENTAL: &[&str] = &[
         "exp",
         "log",
@@ -728,47 +941,157 @@ fn exact_view_of_transcendental(expr: &Expr) -> bool {
         "magnitude",
         "angle",
     ];
-    expr.any_call(|op, args| {
+    case.expr.any_call(|op, args| {
         matches!(op, "exact" | "numerator" | "denominator")
-            && args
-                .iter()
-                .any(|arg| arg.any_call(|inner, _| TRANSCENDENTAL.contains(&inner)))
+            && args.iter().any(|arg| {
+                arg.subexpressions().into_iter().any(|inner| match inner {
+                    Expr::Call(inner_op, _) => {
+                        TRANSCENDENTAL.contains(inner_op)
+                            || (*inner_op == "/" && case.operand_is(inner, |n| !n.is_real()))
+                    }
+                    Expr::Literal(_) => false,
+                })
+            })
     })
 }
 
-fn arithmetic_with_exact_zero(expr: &Expr) -> bool {
-    expr.any_call(|op, args| {
-        matches!(op, "+" | "-" | "*")
-            && args
-                .iter()
-                .any(|a| ruse_num_is(a, |n| n.is_exact() && n.is_zero()))
+/// An `asin` or `acos` call whose argument has a part of 100 or more, and whose ruse answer
+/// passes through `sin` (`cos`) back to the argument: chibi's answer is the one that is wrong.
+fn arc_of_large_complex(case: &Case) -> bool {
+    case.expr
+        .subexpressions()
+        .into_iter()
+        .any(|call| match call {
+            Expr::Call(op @ ("asin" | "acos"), args) => match args.as_slice() {
+                [arg] => case.operand_is(arg, |z| {
+                    !z.is_real()
+                        && [z.real_part(), z.imag_part()]
+                            .iter()
+                            .any(|part| part.to_f64().is_some_and(|x| x.abs() >= 100.0))
+                        && ruse_num(call).is_some_and(|answer| {
+                            let back = if *op == "asin" {
+                                answer.sin()
+                            } else {
+                                answer.cos()
+                            };
+                            agrees(&z.inexact(), &back)
+                        })
+                }),
+                _ => false,
+            },
+            _ => false,
+        })
+}
+
+/// An `expt` call with an exact complex base and a small integer exponent, whose ruse answer
+/// equals the base multiplied out (and inverted for a negative exponent) in exact arithmetic.
+fn exact_complex_integer_power(case: &Case) -> bool {
+    case.expr
+        .subexpressions()
+        .into_iter()
+        .any(|call| match call {
+            Expr::Call("expt", args) => match args.as_slice() {
+                [base, Expr::Literal(exponent)] => {
+                    let power = Num::parse(exponent, 10)
+                        .filter(|n| n.is_exact_integer())
+                        .and_then(|n| n.to_f64())
+                        .map(|x| x as i32)
+                        .filter(|n| n.abs() <= 64);
+                    let Some(power) = power else {
+                        return false;
+                    };
+                    case.operand_is(base, |z| {
+                        matches!(z, Num::ExactComplex(_))
+                            && ruse_num(call).is_some_and(|answer| {
+                                let product = (0..power.abs()).fold(Num::int(1), |p, _| p.mul(z));
+                                let expected = if power < 0 {
+                                    Num::int(1).div(&product).ok()
+                                } else {
+                                    Some(product)
+                                };
+                                expected.is_some_and(|expected| expected.eqv(&answer))
+                            })
+                    })
+                }
+                _ => false,
+            },
+            _ => false,
+        })
+}
+
+fn atan_on_its_branch_cut(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("atan", [arg]) => case.operand_is(arg, |n| {
+            !n.is_real()
+                && n.real_part().is_zero()
+                && n.imag_part().to_f64().is_some_and(|y| y.abs() > 1.0)
+        }),
+        _ => false,
     })
 }
 
-fn gcd_of_mixed_exactness(expr: &Expr) -> bool {
-    expr.any_call(|op, args| {
-        let exact = |a: &Expr| ruse_num_is(a, |n| n.is_exact());
-        let inexact = |a: &Expr| ruse_num_is(a, |n| !n.is_exact());
+fn denominator_of_tiny_flonum(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("denominator", [arg]) => case.operand_is(arg, |n| match n {
+            Num::Flo(x) => *x != 0.0 && x.abs() < 2f64.powi(-9),
+            _ => false,
+        }),
+        _ => false,
+    })
+}
+
+fn trig_of_large_exact(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("sin" | "cos" | "tan", [arg]) => case.operand_is(arg, |n| {
+            n.is_exact() && n.is_real() && n.to_f64().is_some_and(|x| x.abs() > 2f64.powi(53))
+        }),
+        _ => false,
+    })
+}
+
+fn division_by_exact_zero(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("/", [_, rest @ ..]) => rest
+            .iter()
+            .any(|divisor| case.operand_is(divisor, |n| n.is_exact() && n.is_zero())),
+        _ => false,
+    })
+}
+
+fn product_with_exact_zero(case: &Case) -> bool {
+    case.expr.any_call(|op, args| {
+        op == "*"
+            && args
+                .iter()
+                .any(|a| case.operand_is(a, |n| n.is_exact() && n.is_zero()))
+    })
+}
+
+fn gcd_of_mixed_exactness(case: &Case) -> bool {
+    case.expr.any_call(|op, args| {
+        let exact = |a: &Expr| case.operand_is(a, |n| n.is_exact());
+        let inexact = |a: &Expr| case.operand_is(a, |n| !n.is_exact());
         matches!(op, "gcd" | "lcm") && args.iter().any(exact) && args.iter().any(inexact)
     })
 }
 
-fn lcm_of_zeros(expr: &Expr) -> bool {
-    expr.any_call(|op, args| op == "lcm" && args.iter().all(|a| ruse_num_is(a, Num::is_zero)))
+fn lcm_of_zeros(case: &Case) -> bool {
+    case.expr
+        .any_call(|op, args| op == "lcm" && args.iter().all(|a| case.operand_is(a, Num::is_zero)))
 }
 
-fn division_by_one(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
+fn division_by_one(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
         ("quotient" | "remainder" | "modulo", [_, divisor]) => {
-            ruse_num_is(divisor, |n| n.eqv(&Num::int(1)))
+            case.operand_is(divisor, |n| n.eqv(&Num::int(1)))
         }
         _ => false,
     })
 }
 
-fn abs_of_negative_zero(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("abs", [arg]) => ruse_num_is(
+fn abs_of_negative_zero(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("abs", [arg]) => case.operand_is(
             arg,
             |n| matches!(n, Num::Flo(z) if *z == 0.0 && z.is_sign_negative()),
         ),
@@ -776,19 +1099,19 @@ fn abs_of_negative_zero(expr: &Expr) -> bool {
     })
 }
 
-fn angle_of_exact_non_negative(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
-        ("angle", [arg]) => ruse_num_is(arg, |n| {
+fn angle_of_exact_non_negative(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
+        ("angle", [arg]) => case.operand_is(arg, |n| {
             n.is_exact() && n.is_real() && n.sign() != Ok(Some(Ordering::Less))
         }),
         _ => false,
     })
 }
 
-fn complex_over_inexact_zero(expr: &Expr) -> bool {
-    expr.any_call(|op, args| match (op, args) {
+fn complex_over_inexact_zero(case: &Case) -> bool {
+    case.expr.any_call(|op, args| match (op, args) {
         ("/", [dividend, divisor]) => {
-            ruse_num_is(dividend, |n| !n.is_real()) && ruse_num_is(divisor, is_inexact_zero)
+            case.operand_is(dividend, |n| !n.is_real()) && case.operand_is(divisor, is_inexact_zero)
         }
         _ => false,
     })
@@ -814,13 +1137,13 @@ fn domain_of(op: &str, arity: usize) -> Option<Domain> {
     }
 }
 
-fn operand_outside_domain(expr: &Expr) -> bool {
-    expr.any_call(|op, args| {
+fn operand_outside_domain(case: &Case) -> bool {
+    case.expr.any_call(|op, args| {
         let Some(domain) = domain_of(op, args.len()) else {
             return false;
         };
         args.iter().any(|arg| {
-            ruse_num_is(arg, |n| match domain {
+            case.operand_is(arg, |n| match domain {
                 Domain::Real => !n.is_real(),
                 Domain::Rational => !n.is_rational(),
                 Domain::Integer => !n.is_integer(),
@@ -832,7 +1155,7 @@ fn operand_outside_domain(expr: &Expr) -> bool {
 /// Evaluates the expression in chibi with every sub-expression checked for a complex number
 /// whose real and imaginary parts differ in exactness. An error ends the evaluation but
 /// still reports what was seen, since the mixed value may be what caused it.
-fn chibi_keeps_parts_apart(expr: &Expr) -> bool {
+fn chibi_keeps_parts_apart(case: &Case) -> bool {
     let program = format!(
         "(let ((mixed #f)) \
            (define (chk x) \
@@ -841,7 +1164,7 @@ fn chibi_keeps_parts_apart(expr: &Expr) -> bool {
                  (set! mixed #t)) \
              x) \
            (guard (e (#t mixed)) {} mixed))",
-        expr.watched()
+        case.expr.watched()
     );
     chibi_run(&program) == Outcome::Value("#t".to_owned())
 }
@@ -871,9 +1194,7 @@ fn agrees(expect: &Num, got: &Num) -> bool {
                 _ => false,
             };
     }
-    !got.is_real()
-        && agrees(&expect.real_part(), &got.real_part())
-        && agrees(&expect.imag_part(), &got.imag_part())
+    agrees(&expect.real_part(), &got.real_part()) && agrees(&expect.imag_part(), &got.imag_part())
 }
 
 /// Why the two answers differ, or `Ok` when they agree.
@@ -960,7 +1281,7 @@ fn tower_agrees_with_chibi() {
                 tally.agreed += 1;
                 Ok(())
             }
-            Err(why) => match divergence(&expr) {
+            Err(why) => match divergence(&Case::new(&expr)) {
                 Some(known) => {
                     *tally.excused.entry(known.shape).or_default() += 1;
                     Ok(())

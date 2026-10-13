@@ -184,8 +184,8 @@ fn negative_zero_survives_identity_arithmetic() {
         ),
         Value::TRUE
     );
-    // Subtracting an exact zero leaves -0.0 alone, inlined or not: the `ADDI` shortcut for
-    // a small literal must not turn it into an addition of 0.0.
+    // An exact zero is the additive identity: adding or subtracting it leaves -0.0 alone,
+    // inlined or not, rather than promoting it to 0.0 and adding that.
     assert_eq!(
         eval(
             &mut vm,
@@ -194,6 +194,9 @@ fn negative_zero_survives_identity_arithmetic() {
         Value::TRUE
     );
     assert_eq!(eval(&mut vm, "(eqv? (- z 0) -0.0)"), Value::TRUE);
+    assert_eq!(eval(&mut vm, "(eqv? (+ z 0) -0.0)"), Value::TRUE);
+    assert_eq!(eval(&mut vm, "(eqv? (+ 0 z) -0.0)"), Value::TRUE);
+    assert_eq!(eval(&mut vm, "(eqv? (- 0 0.0) -0.0)"), Value::TRUE);
     // And the type check still fires with no addition to do.
     let err = eval_err(&mut vm, "(plus \"a\")");
     assert!(matches!(

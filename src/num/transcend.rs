@@ -60,11 +60,11 @@ impl Num {
     }
 
     pub fn asin(&self) -> Num {
-        self.arc(f64::asin, asin_beyond_unit, Complex::asin)
+        self.arc(f64::asin, asin_beyond_unit, complex_asin)
     }
 
     pub fn acos(&self) -> Num {
-        self.arc(f64::acos, acos_beyond_unit, Complex::acos)
+        self.arc(f64::acos, acos_beyond_unit, complex_acos)
     }
 
     pub fn atan(&self) -> Num {
@@ -257,9 +257,25 @@ fn complex_sqrt(mut z: Complex<f64>) -> Num {
     Num::inexact_complex(z.sqrt())
 }
 
+/// `asin` of a non-real number by Kahan's formulas. `Complex::asin` evaluates
+/// `-i ln(iz + sqrt(1 - z²))`, whose terms cancel away the digits of the answer once `|z|`
+/// passes about `1e5` and make a NaN of it past `1e8`; pairing the square roots of `1 - z` and
+/// `1 + z` keeps every digit, and the signed zero of an imaginary part still picks the side of
+/// the branch cut.
+fn complex_asin(z: Complex<f64>) -> Complex<f64> {
+    let (a, b) = ((1.0 - z).sqrt(), (1.0 + z).sqrt());
+    Complex::new(z.re.atan2((a * b).re), (a.conj() * b).im.asinh())
+}
+
+/// `acos` of a non-real number by Kahan's formulas; see [`complex_asin`].
+fn complex_acos(z: Complex<f64>) -> Complex<f64> {
+    let (a, b) = ((1.0 - z).sqrt(), (1.0 + z).sqrt());
+    Complex::new(2.0 * a.re.atan2(b.re), (b.conj() * a).im.asinh())
+}
+
 /// `asin` of a real outside `[-1, 1]` in closed form, with the imaginary part negative for a
-/// positive argument as `(asin 2)` has it. `Complex::asin` evaluates
-/// `-i ln(iz + sqrt(1 - z²))`, whose terms cancel to a NaN real part for a large negative `z`.
+/// positive argument as `(asin 2)` has it. A real argument has an exact-zero imaginary part,
+/// which Kahan's formulas would read as `+0.0` and put on the upper side of the cut.
 fn asin_beyond_unit(x: f64) -> Complex<f64> {
     Complex::new(FRAC_PI_2.copysign(x), -acosh(x.abs()).copysign(x))
 }
@@ -407,6 +423,57 @@ mod tests {
         );
         assert_eq!(Num::flo(f64::NAN).asin(), Num::flo(f64::NAN));
         assert!(acosh(1e308).is_finite());
+    }
+
+    // The references are Python's `cmath.asin` and `cmath.acos`, which use an unrelated
+    // algorithm. The tolerance is far below the digits `Complex::asin` loses at 1e5 and
+    // above, and loose enough for Miri's few-ulp perturbation of `atan2` and `asinh`.
+    #[test]
+    fn asin_and_acos_of_a_complex_argument_keep_their_digits_at_any_magnitude() {
+        let cases = [
+            (
+                (1e10, 2.5),
+                (1.5707963265448965, 23.7189981105004),
+                (2.5e-10, -23.7189981105004),
+            ),
+            (
+                (-1e10, 2.5),
+                (-1.5707963265448965, 23.7189981105004),
+                (3.141592653339793, -23.7189981105004),
+            ),
+            (
+                (1e5, 2.5),
+                (1.5707713267949006, 12.206072645817674),
+                (2.4999999996041667e-5, -12.206072645817674),
+            ),
+            (
+                (1.0, 1.0),
+                (0.6662394324925153, 1.0612750619050357),
+                (0.9045568943023814, -1.0612750619050357),
+            ),
+            (
+                (3.0, -4.0),
+                (0.6339838656391766, -2.305509031243477),
+                (0.9368124611557198, 2.305509031243477),
+            ),
+            (
+                (1e200, 1e200),
+                (0.7853981633974483, 461.55673936964905),
+                (0.7853981633974484, -461.55673936964905),
+            ),
+        ];
+        let close = |actual: Num, (re, im): (f64, f64)| match actual {
+            Num::InexactComplex(z) => {
+                (z.re - re).abs() <= 1e-12 * re.abs().max(1.0)
+                    && (z.im - im).abs() <= 1e-12 * im.abs().max(1.0)
+            }
+            _ => false,
+        };
+        for ((re, im), asin, acos) in cases {
+            let z = c(Num::flo(re), Num::flo(im));
+            assert!(close(z.asin(), asin), "asin of {re}{im:+}i");
+            assert!(close(z.acos(), acos), "acos of {re}{im:+}i");
+        }
     }
 
     #[test]

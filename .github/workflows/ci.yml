@@ -110,6 +110,9 @@ jobs:
     name: Differential vs chibi
     runs-on: ubuntu-latest
     continue-on-error: true
+    # A chibi that hangs on every case would otherwise hold the runner for hours: each case
+    # waits up to ten seconds for it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -117,7 +120,8 @@ jobs:
       - name: Install chibi-scheme
         run: sudo apt-get update && sudo apt-get install -y chibi-scheme
 
+      # --nocapture puts the tally and the excused buckets in the job log.
       - name: Differential test
-        run: cargo test --test chibi_diff -- --ignored
+        run: cargo test --test chibi_diff -- --ignored --nocapture
         env:
           RUSE_CHIBI: "1"
