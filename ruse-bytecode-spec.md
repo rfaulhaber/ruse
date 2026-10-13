@@ -127,14 +127,14 @@ LOADIMM r0, #t
 
 ### 4.2 Arithmetic (7)
 
-All check operands for the fixnum tag and execute inline on the fast path; otherwise dispatch to the numeric-tower runtime, which handles flonum/bignum/rational/complex and signals a non-number error. Fixnum overflow promotes to bignum (never wraps — R7RS integers are unbounded).
+All check operands for the fixnum tag and answer on the fast path; otherwise they dispatch to the numeric-tower runtime, which handles flonum/bignum/rational/complex and signals a non-number error. The check lives in the runtime function the dispatch arm calls (`rt::arith`), not in the arm, so the arm only decodes operands and stores the result. Fixnum overflow promotes to bignum (never wraps — R7RS integers are unbounded).
 
 | Op | Format | Effect |
 |----|--------|--------|
 | `ADD A B C` | iABC | `RA := RB + RC` |
 | `SUB A B C` | iABC | `RA := RB − RC` |
 | `MUL A B C` | iABC | `RA := RB × RC` |
-| `DIV A B C` | iABC | `RA := RB ÷ RC`. **Exact division** — see §1.2. Fast path only when fixnum RC divides fixnum RB evenly; otherwise allocates a rational or signals divide-by-zero. |
+| `DIV A B C` | iABC | `RA := RB ÷ RC`. **Exact division** (see §1.2) via `rt::arith::div`: the divides-evenly fast path (fixnum RC divides fixnum RB) is the function's first statement; anything else goes to the tower and allocates a rational. Division by an exact zero is `DivisionByZero`. |
 | `QUOT A B C` | iABC | `RA := (truncate/ RB RC)` quotient. Fixnum-fast, integer-only, the "machine division" escape hatch. |
 | `NEG A B` | iABC | `RA := −RB` |
 | `ADDI A B sC` | iABC | `RA := RB +` (signed byte) `sC`. Loop-counter fast path; sC ∈ −128..127. |
@@ -355,6 +355,6 @@ The capture is described by the child prototype's descriptor table (`u0 <- paren
 1. **`CADR` path encoding** — confirm the C-byte layout (length nibble + direction bits) handles the full `caar`…`cddddr` set (max depth 4 → fits in 4 bits + 4-bit length). It does, but lock the bit layout before the compiler emits it.
 2. **`TYPEP` type enum** — finalize the integer assignments and whether disjoint-type fast checks (pair/null/fixnum) get a branch ahead of the general table lookup.
 3. **Global slot table growth** — REPL redefinition needs slots to be append-only and stable. Decide whether library boundaries get separate slot namespaces.
-4. **`DIV` policy** — confirm with the numeric-tower design that the "divides evenly" fast path is worth the branch, or whether `DIV` should always go to the runtime and `QUOT` carries the fast integer path alone.
+4. **`DIV` policy** — resolved in M5: the "divides evenly" fast path earns its branch, as the first statement of `rt::arith::div`, so the dispatch arm never branches; `QUOT` keeps its own integer fast path (see the `DIV` row in §4.2).
 5. **Line-info table format** — provisionally answered in M2: `Proto.spans` is a per-instruction table of source byte spans (empty when debug info is stripped), because the reader already produces byte spans and miette consumes them directly. A compressed encoding can replace the representation behind that field if it ever matters; revisit before the compiler emits it at scale.
 

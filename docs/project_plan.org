@@ -26,8 +26,12 @@ Verified against the working tree, not against the roadmap's own claims.
 - =src/lexer.rs= (752 loc), =src/parser.rs= (576), =src/ast.rs= (184), =src/span.rs= (130) —
   a span-carrying reader with miette diagnostics.
 - =src/value/= — the NaN-boxed ~Value~, the ~repr(C)~ heap objects (now including
-  ~Closure~ and ~NativeProc~), and =layout.rs=, the single home for every mask, tag and
-  field offset (M1, extended in M3).
+  ~Closure~, ~NativeProc~, ~Ratnum~ and ~Compnum~), and =layout.rs=, the single home for
+  every mask, tag and field offset (M1, extended in M3 and M5).
+- =src/num/= — the numeric tower (M5): ~Num~, a heap-free enum over ~BigInt~,
+  ~BigRational~, ~f64~ and exact and inexact ~Complex~, with its arithmetic, integer
+  operations, §7.1.1 literal parser, printer and transcendentals. Every numeric question in
+  the lexer, printer, ~eqv?~ and runtime is answered here.
 - =src/gc/= — the precise non-moving mark-sweep ~Heap~ (whose ~collect~ is now
   ~unsafe fn~ — see the resolved open question), the ~Trace~ root trait, and the pin
   shadow stack for native temporaries (M1).
@@ -40,9 +44,10 @@ Verified against the working tree, not against the roadmap's own claims.
   close the dying frame's cells), rest-argument collection at call entry, the one GC
   safepoint with the VM state — open-upvalue list included — as root set, and typed
   ~VmError~ s throughout.
-- =src/rt/= — opcode and primitive semantics as standalone functions (habit 2): the M3
-  numeric slice, pairs, vectors, ~eqv?~/~equal?~, the ~display~/~write~ printer, and the
-  ~PRIMCALL~ native-function table with ~37 primitives, each also a global.
+- =src/rt/= — opcode and primitive semantics as standalone functions (habit 2): the
+  arithmetic opcodes (fixnum fast paths in front of the tower), pairs, vectors,
+  ~eqv?~/~equal?~, the ~display~/~write~ printer, and the ~PRIMCALL~ native-function table
+  with 93 primitives (37 core, 56 numeric in =rt/numeric.rs=), each also a global.
 - =src/compiler/= — decision C's two passes: ~Expr~ → typed Core IR (syntax, keyword
   shadowing, and since M4 the derived forms as lowering-time desugarings plus internal
   defines as ~letrec*~) and destination-register + tail-flag codegen over a Lua-style
@@ -55,18 +60,21 @@ Verified against the working tree, not against the roadmap's own claims.
 - =tests/eval.rs= — the M3 exit criteria as end-to-end tests.
 - =tests/r7rs_progress.rs= — the incremental conformance driver over
   =tests/r7rs_suite/r7rs.scm=, gating on a ratcheting passing-test floor.
+- =tests/chibi_diff.rs= — a non-gating proptest differential of the numeric tower against
+  chibi-scheme, with a table of documented divergences.
 - =ruse-bytecode-spec.md= — RBC-1, amended in M2 to match the frozen decisions (50 opcodes,
   normative §5 byte table, layout-ordinal ~LOADIMM~, ~UpvalDesc~ capture, derived §6
   listings).
 
 ** What does not exist
 
-There is no numeric tower beyond the M3 fixnum/bignum/flonum slice, no reader breadth
-beyond it either (no vector literals, datum labels or full escapes — M6), no macro
-expander, no ports, no first-class control (multiple values included, which is why
-~let-values~ only binds single-value shapes), and only the minimal stdlib. Every opcode
-owned by a later milestone executes as a typed ~Unimplemented~ error rather than
-~unreachable!~.
+There is no reader breadth beyond the number grammar (no vector literals, datum labels or
+full escapes — M6), no macro expander, no ports, no first-class control (multiple values
+included, which is why ~let-values~ only binds single-value shapes and why ~floor/~,
+~truncate/~ and ~exact-integer-sqrt~ are not installed), and only the minimal stdlib. The
+numeric tower is otherwise complete: exact and inexact complex numbers, rationals and
+bignums, the full §7.1.1 literals, and the §6.2.6 procedures. Every opcode owned by a later
+milestone executes as a typed ~Unimplemented~ error rather than ~unreachable!~.
 
 ** Two corrections to the recorded status, since fixed
 
@@ -536,21 +544,137 @@ list in the traced root set.
   window go stale inside the *caller's* still-traced window, which the M3 root-set
   invariant already licenses.
 
-* TODO [#B] M5 — Numeric tower and the §7.1.1 number reader [/]      :effort_XL:
+* DONE [#B] M5 — Numeric tower and the §7.1.1 number reader [4/4]    :effort_XL:
+CLOSED: [2026-10-13 Tue]
 
 *Deps:* M1, M3.
-*Exit:* bignums, reduced rationals, ~#e~/~#i~ prefixes, exact complex, inf/NaN read,
-compute and print; the signed-literal lex bug fixed; non-gating differential against
-chibi on a proptest mix. ~exact-integer-sqrt~/~floor/~/~truncate/~ defer past M7.
+*Exit met:* bignums, reduced rationals, flonums with ±inf/NaN, and exact and inexact
+complex numbers read, compute and print, through the whole §7.1.1 literal grammar and 56
+new numeric natives (93 primitives in all). The suite driver's ratchet rises from 156 to
+*333 passing tests* — 1180 top-level forms, 395 of them evaluated, and the shim's tally
+reads ~tests: 333 passed, 2 failed~, the same two M7-collateral failures as before. The
+non-gating proptest differential against chibi-scheme runs 300 cases: 267 agree, 29 are
+excused by documented divergences, 4 are skipped because chibi itself crashed, and none
+fail; a 20000-case survey classified every disagreement it found. Under
+~cargo nextest run --all-targets~ 255 tests pass and one (the ignored differential) is
+skipped; clippy ~-D warnings~ and fmt are clean, Miri is green under both aliasing models
+with five lib tests ignored, and ~nix build~ is green. ~floor/~, ~truncate/~ and
+~exact-integer-sqrt~ stay out until M7 gives them multiple values to return.
 
-- [ ] Tower types: bignum, gcd-normalized rational, flonum incl. ±inf/NaN, exact and
+- [X] Tower types: bignum, gcd-normalized rational, flonum incl. ±inf/NaN, exact and
       inexact complex
-- [ ] Generic dispatch with exact/inexact contagion; ~DIV~ exact-rational trap; ~QUOT~
+- [X] Generic dispatch with exact/inexact contagion; ~DIV~ exact-rational trap; ~QUOT~
       integer fast path; NaN-aware comparisons
-- [ ] Predicates, exact/inexact conversion, ~number->string~/~string->number~ with radix
-- [ ] Number sub-reader: full grammar — radix and exactness prefixes, rationals,
+- [X] Predicates, exact/inexact conversion, ~number->string~/~string->number~ with radix
+- [X] Number sub-reader: full grammar — radix and exactness prefixes, rationals,
       decimals, inf/NaN, ~±i~; fix the ~+~/~.~-prefixed dispatch and the dead minus-sign
       code at =lexer.rs:280=
+
+** What M5 settled beyond the checklist
+
+- *One heap-free type answers every numeric question.* =src/num/= defines ~Num~ — five
+  variants, each typed by a crate: ~Int(BigInt)~, ~Rat(BigRational)~, ~Flo(f64)~,
+  ~ExactComplex(Complex<BigRational>)~ and ~InexactComplex(Complex<f64>)~ — which never
+  touches the GC heap, so the lexer, the printer, ~eqv?~ and the runtime call the same
+  code without a ~Heap~ in hand. Constructors canonicalise (a ratio over 1 is an ~Int~, an
+  exact-zero imaginary part collapses to the real part, every NaN is ~f64::NAN~'s bits),
+  which lets the structural, bitwise ~PartialEq~ mean representation equality; numeric
+  ~=~ is ~Num::num_eq~. Every precondition the crates assert on (a zero denominator, a
+  negative radix, ~0 ** -n~) is guarded in =src/num/= and surfaces as a ~NumError~, so
+  nothing there panics on user data.
+- *Boxing has one door.* Heap tags ~Ratnum = 11~ and ~Compnum = 12~ are additive;
+  ~Heap::number~ is the only place a ~Num~ becomes a ~Value~, and ~rt::arith::unbox~ is
+  its inverse. ~unary~ and ~binary~ carry unbox→compute→box for every opcode slow path and
+  every numeric native, ~operand~ reads a single number for the predicates, and ~num_err~
+  maps a ~NumError~ onto the two new typed kinds, ~VmErrorKind::DivisionByZero~ and
+  ~NumericDomain~. The fixnum fast paths stay in the ~rt::arith~ functions, ahead of the
+  tower, so the dispatch arms still only decode and call; =src/rt/numeric.rs= holds the 56
+  new natives, appended to the table after the existing ones.
+- *Reading scans to a delimiter, then classifies.* The lexer cuts a run at the next
+  delimiter (whitespace, brackets, ~"~, ~;~ or ~|~) and classifies it whole: ~Num::parse~
+  first, then the R7RS peculiar-identifier rule (~+soup+~ is a symbol), else
+  ~InvalidNumber~. The scanner checks the character set itself before a crate sees a digit
+  string — ~BigInt::parse_bytes~ accepts ~_~ and ~Ratio~'s parser accepts ~1/-3~ — so no
+  user text reaches a crate assertion. ~#e~ on a decimal reads the decimal exactly
+  (~#e0.1~ is ~1/10~), with the exponent capped at ~MAX_EXACT_DECIMAL_EXPONENT~ (100000)
+  so ~#e1e999999999~ cannot build a billion-digit integer from a dozen characters.
+- *Printing follows what the suite checks.* A flonum's exponent form always has a point and
+  a signed exponent (~1.0e+21~), which the suite's ~test-precision~ strings require;
+  ~number->string~ refuses an inexact number in any radix but 10, where the exponent
+  marker ~e~ would be a digit; the disassembler spells flonum constants the way ~write~
+  does.
+- *Exact complex is committed, and mixed exactness goes inexact.* A complex with parts of
+  mixed exactness coerces both to inexact (Chez's choice; chibi keeps them apart, and the
+  differential lists it as a divergence), and an exact-zero imaginary part collapses to a
+  real *before* any coercion, so ~-2.5+0i~ is a real. An inexact zero imaginary part is
+  kept. An exact complex base under an exact integer exponent stays exact.
+- *Zeros.* An exact zero is the additive identity: ~(+ -0.0 0)~ is ~-0.0~, and the ~ADDI~
+  peephole never rewrites a zero immediate. The multi-valued functions share one
+  signed-zero convention — a ±0.0 imaginary part is treated as the real axis for ~sqrt~,
+  ~asin~ and ~acos~, whatever its sign. ~atan~ still follows ~num-complex~'s branch cut,
+  a recorded deviation from C99, chibi and Python's ~cmath~, which pick the side from the
+  sign of the zero.
+- *Transcendentals are always inexact* except where the exact answer is a perfect power:
+  ~sqrt~ of an exact real whose root is a ratio of integers, and ~expt~ of an exact base
+  under an exact integer exponent. Complex ~asin~/~acos~ off the real axis use Kahan's
+  closed forms. ~(expt 0 z)~ follows R7RS's ~0^z~ rule, with an error for a negative real
+  part; an inexact zero base keeps IEEE (~(expt 0.0 -1)~ is ~+inf.0~).
+- *~rationalize~ is the one algorithm written by hand* (=src/num/integer.rs=); the tower's
+  design approved it as the single exception to leaning on the crates. ~exact_integer_sqrt~
+  lives beside it but is not installed as a procedure until M7.
+- *The crate pairing is ~num-bigint~ 0.4, not 0.5.* No ~num-rational~ release pairs with
+  0.5, and ~BigRational~ must be built on the same ~BigInt~ as the rest of the tower. With
+  ~num-rational 0.4~, ~num-complex 0.4~ and ~num-integer 0.1~ joining ~num-traits~, those
+  are the dependencies; ~proptest~ is a dev-dependency serving only the differential, and
+  ~chibi~ joins the dev shell.
+- *The checklist's lexer item was partly stale.* The dead minus-sign code at
+  =lexer.rs:280= had been removed in M0; the real work was replacing per-character number
+  lexing with scan-then-classify, which also fixes the ~+~/~.~-prefixed dispatch.
+- *The suite shim adopts chibi's comparator.* The driver's ~test~ shim compares with
+  chibi's ~test-equal?~ and ~approx-equal?~ (a relative error below 1e-5 for an inexact
+  real expectation, part by part for a complex one) in place of ~equal?~, which is what
+  the suite was written against and what lifts the ratchet from 156 to 333.
+- *The differential is a bug finder, not a gate.* =tests/chibi_diff.rs= is marked
+  ~#[ignore]~, returns early unless ~RUSE_CHIBI~ is set, and runs in an advisory CI job.
+  Its ~DIVERGENCES~ table names each expression shape where chibi is wrong or extends
+  R7RS, with the reason; a disagreement on a case no entry covers fails the run.
+- *Miri-aware tests.* Four ~transcend~ tests are ~cfg_attr(miri, ignore)~: Miri perturbs
+  float transcendental results (the run does not use ~-Zmiri-deterministic-floats~), so
+  bitwise assertions on ~sin~, ~exp~ and ~acosh~ outputs cannot hold under it.
+- *Deferred follow-ups.*
+  - A Kahan ~atan~ for the branch cut.
+  - A ~hypot~-based complex square root: ~num-complex~'s polar form loses relative
+    precision in the small part beyond about 1e10, which affects ~sqrt~ and ~acos~.
+  - ~(expt 2 4294967295)~ is accepted and would build a 512 MiB bignum.
+  - ~eqv?~ on two heap numbers clones both payloads.
+
+** What the adversarial review of the implementation found
+
+One fresh reviewer per task, and a scoped re-review of each fix, found six Important
+defects; all six are fixed:
+
+1. *~rectangular~ coerced mixed exactness before collapsing an exact-zero imaginary
+   part*, so ~(real? -2.5+0i)~ would have been ~#f~. Fixed by collapsing first.
+2. *The integer-division family accepted an inexact complex with a 0.0 imaginary part.*
+   Fixed: a non-real operand is a typed domain error.
+3. *The at-cap ~#e1e100000~ parse test took six virtual minutes under Miri.* Fixed with
+   ~cfg_attr(miri, ignore)~; it still runs natively.
+4. *Complex ~asin~/~acos~ lost digits above about 1e5*, and was first excused as a chibi
+   divergence rather than fixed. Fixed with Kahan's closed forms.
+5. *Kahan's forms lost the sign of a zero imaginary part on (1, ∞).* Fixed by the single
+   signed-zero convention for ~asin~ and ~acos~.
+6. *Divergence predicates classified cases by ruse's own answers*, so a ruse bug could
+   excuse itself. Fixed: each predicate judges independently — a round trip through ~sin~
+   or ~cos~, a repeated product, a squared root.
+
+The differential harness, once it ran, found three bugs in the tower itself:
+
+1. ~asin~ and ~acos~ of a large real answered NaN, then cancelled away digits. Fixed with
+   a closed form.
+2. ~tan~ of a complex number with a large imaginary part answered NaN. Fixed: it
+   saturates to ±i.
+3. The ~ADDI~ peephole turned ~(- x 0)~ into ~x + 0~, and so ~-0.0~ into ~0.0~. Fixed:
+   the peephole leaves a zero immediate alone.
 
 * TODO [#B] M6 — Reader datum breadth and runtime ~read~ [/]          :effort_L:
 
@@ -725,11 +849,14 @@ postdates a working sequential VM. The spec's deferred flonum-specialized opcode
       Still open: the multiple-value convention (M7) and freezing table order, which
       only matters once bytecode serializes
 - [ ] *Non-R7RS extensions*: keep ~[ ]~ bracket lists and the ~#!eof~/~#!default~
-      singletons, or drop them? Commit to exact complex (R7RS permits omitting it, but
-      the suite tests it)?
-- [ ] *~DIV~ policy* (spec open-Q 4): confirm the "divides evenly" fast path earns its
-      branch, or whether ~DIV~ should always go to the runtime with ~QUOT~ carrying the
-      fast integer path alone
+      singletons, or drop them?
+- [X] *Exact complex numbers* — committed in M5: R7RS permits omitting them, but the suite
+      tests them, so the tower carries exact complex (~Complex<BigRational>~) alongside
+      inexact
+- [X] *~DIV~ policy* (spec open-Q 4) — resolved in M5: the "divides evenly" fast path
+      earns its branch and is the first statement of ~rt::arith::div~, so the dispatch arm
+      never branches, ~QUOT~ keeps its own integer fast path, and division by an exact
+      zero is ~DivisionByZero~
 - [X] *Line-info table format* (spec open-Q 5) — provisionally settled in M2:
       ~Proto.spans~ is a per-instruction table of source *byte spans* (empty when debug
       info is stripped), because the reader already produces byte spans and miette

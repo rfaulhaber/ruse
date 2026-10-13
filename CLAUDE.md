@@ -11,7 +11,9 @@ Ruse is "Ryan's Useful Scheme Experiment" - a set of R7RS Scheme implementations
 Standard Cargo layout — sources live in `src/`:
 - `src/main.rs` - Binary entry point (`ruse` executable); dispatches to the REPL or file evaluation
 - `src/lib.rs` - Library crate root; re-exports the public API
-- `src/lexer.rs` - Hand-written lexer producing `Token`s with byte spans
+- `src/lexer.rs` - Hand-written lexer producing `Token`s with byte spans; a run that starts
+  like a number is scanned to the next delimiter and classified whole (`Num::parse`, then
+  the peculiar-identifier rule, else `InvalidNumber`)
 - `src/parser.rs` - Recursive-descent `Parser`, producing the `Expr` AST
 - `src/ast.rs` - `Expr` s-expression AST, span-carrying
 - `src/span.rs` - `Span` / `SourceFile` source-location utilities
@@ -19,8 +21,20 @@ Standard Cargo layout — sources live in `src/`:
   - `src/value/layout.rs` - **The memory map.** Every NaN-box mask, tag constant and heap-object
     field offset is defined here exactly once, with `const` assertions enforcing the layout
   - `src/value/mod.rs` - `Value`, the NaN-boxed 64-bit word
-  - `src/value/object.rs` - The `repr(C)` heap objects (including `Closure`) and the
-    `HeapObject` trait
+  - `src/value/object.rs` - The `repr(C)` heap objects (including `Closure`, `Ratnum` and
+    `Compnum`) and the `HeapObject` trait
+- `src/num/` - The numeric tower (M5): `Num`, heap-free, so the lexer, printer and runtime
+  all call the one implementation
+  - `src/num/mod.rs` - `Num` (five crate-typed variants), its canonicalising constructors,
+    `NumError`, predicates, `exact`/`inexact`
+  - `src/num/arith.rs` - Arithmetic with exact/inexact contagion, exact comparison across
+    representations, `eqv`, `max`/`min`
+  - `src/num/integer.rs` - The integer division family, rounding, `gcd`/`lcm`,
+    `numerator`/`denominator`, `rationalize` and the exact integer square root
+  - `src/num/parse.rs` - The §7.1.1 number grammar (`Num::parse`)
+  - `src/num/print.rs` - `to_string_radix` and the flonum text `write` shares
+  - `src/num/transcend.rs` - `exp`/`log`/trigonometry, `sqrt`/`expt` and the complex
+    accessors
 - `src/gc/` - The heap and collector
   - `src/gc/mod.rs` - `Heap`: allocation, symbol interning, mark-sweep, `Drop`-on-sweep
   - `src/gc/trace.rs` - The `Trace` root trait and the grey worklist `Tracer`
@@ -46,12 +60,17 @@ Standard Cargo layout — sources live in `src/`:
     of the unsafe `Heap::collect`
 - `src/rt/` - Opcode and primitive semantics as standalone functions (habit 2: dispatch
   arms decode operands and call in here; nothing semantic lives inline in the loop)
-  - `src/rt/arith.rs` - The M3 numeric slice (fixnum/bignum/flonum; M5 replaces the insides)
+  - `src/rt/arith.rs` - The arithmetic and comparison opcodes: a fixnum fast path in front
+    of the tower, with `unbox`/`unary`/`binary` carrying everything else through `Num`
+    (unbox, compute, box via `Heap::number`)
+  - `src/rt/numeric.rs` - The 56 R7RS §6.2.6 numeric natives (predicates, division family,
+    rounding, transcendentals, conversions), each a thin shell over `Num`
   - `src/rt/pairs.rs`, `src/rt/vectors.rs` - Pair and vector opcode semantics
   - `src/rt/equal.rs` - `eqv?` and the worklist-driven non-cyclic `equal?`
   - `src/rt/write.rs` - The printer: `display`/`write` styles, worklist-driven
   - `src/rt/prims.rs` - The `PRIMCALL` native-function table (`PrimTable`, `NativeCtx`)
-    and the M3 primitive set, each also installed as a `NativeProc` global
+    and the core primitive set, each also installed as a `NativeProc` global; the numeric
+    natives follow it in the table
 - `src/compiler/` - The M3 compiler (decision C: no CPS, no ANF)
   - `src/compiler/ir.rs` - Lowering `Expr` → typed Core IR; owns syntax, form arities, and
     keyword shadowing (a lexical binding hides a special form)
@@ -69,25 +88,33 @@ Standard Cargo layout — sources live in `src/`:
   frame-depth tail calls, bignum promotion, safepoint survival, typed errors)
 - `tests/r7rs_progress.rs` - The incremental, error-tolerant conformance driver over the
   suite: splits top-level forms textually, evaluates what compiles, tallies a score
+- `tests/chibi_diff.rs` - The non-gating proptest differential of the numeric tower against
+  `chibi-scheme`; its `DIVERGENCES` table records where chibi is wrong or extends R7RS
 - `tests/r7rs_suite/r7rs.scm` - R7RS compliance test suite (driven by `r7rs_progress`)
 - `ruse-bytecode-spec.md` - **RBC-1**, the target bytecode ISA (Lua-style register VM); the implementation goal
 - Project uses Nix flakes for the development environment
 
 ### Current status
 
-M0–M4 are done: source text goes reader → compiler → verifier → dispatch loop → value,
-end to end, with real closures. The language slice is `lambda` (fixed, rest-only and
-dotted parameter lists), `define` (top-level and internal-as-`letrec*`), `if`, `quote`,
-`quasiquote` with depth tracking, `set!` (locals, captures and globals), `begin`, the
-whole `let` family (`let`/`let*`/`letrec`/`letrec*`/named `let`/`do`/single-value
-`let-values`), `and`/`or`/`when`/`unless`/`cond`/`case`, and ~37 native primitives.
+M0–M5 are done: source text goes reader → compiler → verifier → dispatch loop → value,
+end to end, with real closures and the full numeric tower. The language slice is `lambda`
+(fixed, rest-only and dotted parameter lists), `define` (top-level and
+internal-as-`letrec*`), `if`, `quote`, `quasiquote` with depth tracking, `set!` (locals,
+captures and globals), `begin`, the whole `let` family
+(`let`/`let*`/`letrec`/`letrec*`/named `let`/`do`/single-value `let-values`),
+`and`/`or`/`when`/`unless`/`cond`/`case`, and 93 native primitives.
 Upvalues are Lua-style open→closed cells (`src/value/object.rs::UpvalueCell`, the VM's
 open list in `src/vm/mod.rs`); `TAILCALL` reuses frames *and* closes the reused frame's
 cells first, so tail recursion — named-`let` and `do` loops included — runs in constant
 space with per-iteration captures independent. Fixnum overflow promotes to bignums, and
 collections happen only at the dispatch loop's safepoint with the frame windows plus the
-open-upvalue list as the root set. Still to come: the numeric tower (M5), reader breadth
-(M6), first-class control and multiple values (M7), hygienic macros and libraries (M8),
+open-upvalue list as the root set. M5 adds the tower in `src/num/`: bignums, reduced
+rationals, flonums with ±inf/NaN, and exact and inexact complex numbers, read through the
+whole §7.1.1 literal grammar (radix and exactness prefixes, rationals, decimals, polar and
+rectangular complex), computed with exact/inexact contagion and printed in any radix. The
+56 numeric natives cover R7RS §6.2.6 except `floor/`, `truncate/` and
+`exact-integer-sqrt`, which return multiple values. Still to come: reader breadth (M6),
+first-class control and multiple values (M7), hygienic macros and libraries (M8),
 stdlib/ports/conformance (M9). Opcodes owned by those milestones execute as typed
 `Unimplemented` errors, never `unreachable!`. The goal is a bytecode-compiled R7RS
 implementation targeting the register VM described in `ruse-bytecode-spec.md`.
@@ -145,9 +172,11 @@ implementation targeting the register VM described in `ruse-bytecode-spec.md`.
   while nothing serializes bytecode.
 - **Errors are values**: every failure path in the VM, the runtime and the natives is a
   typed `VmErrorKind` (spans attached from `Proto.spans` at the faulting instruction).
-  Milestone-future opcodes return `Unimplemented`; a broken VM invariant returns
-  `Internal` and says it is a ruse bug. No `unwrap`, no `unreachable!` — the lint wall
-  makes this a build property.
+  A numeric failure is `DivisionByZero` (an exact zero divisor) or `NumericDomain` (an
+  argument outside the function's domain), both mapped from `NumError` by
+  `rt::arith::num_err`. Milestone-future opcodes return `Unimplemented`; a broken VM
+  invariant returns `Internal` and says it is a ruse bug. No `unwrap`, no `unreachable!` —
+  the lint wall makes this a build property.
 
 ### Upvalue invariants (M4)
 
@@ -166,6 +195,27 @@ implementation targeting the register VM described in `ruse-bytecode-spec.md`.
   references (`PrematureReference`), so the runtime check only fires through captures.
 - **Rest arguments are call-entry metadata, not an opcode**: `CALL`/`TAILCALL` cons the
   extras into a list placed in `R[nparams]` after the callee window is sized.
+
+### Numeric tower invariants (M5)
+
+- **`Heap::number` is the one place a `Num` becomes a `Value`**, and `rt::arith::unbox` the
+  one way back. The fast paths hand fixnum results to `Heap::integer`/`integer_from_big`,
+  which `Heap::number` uses too, so the fixnum/bignum boundary has a single owner and no
+  other code allocates a `Bignum`, `Ratnum` or `Compnum`.
+- **`Num` constructors canonicalise; never build a variant directly.** `Num::rational`,
+  `from_ratio`, `rectangular` and `inexact_complex` collapse a ratio over 1 to `Int`, an
+  exact-zero imaginary part to a real, and every NaN to `f64::NAN`'s bits. The structural,
+  bitwise `PartialEq` and the heap representation both rely on it.
+- **Crate preconditions are guarded in `src/num/`.** The `num-*` crates assert on a zero
+  denominator, a negative radix, `0 ** -n`; each is checked first and surfaces as a
+  `NumError`, so no user datum reaches a crate panic. `num-bigint` stays at 0.4, the
+  release `num-rational` pairs with.
+- **One signed-zero convention.** A ±0.0 imaginary part is the real axis for `sqrt`,
+  `asin` and `acos`, whatever its sign; `atan` follows `num-complex`'s cut, a recorded
+  deviation.
+- **An exact zero is the additive identity**: `(+ -0.0 0)` is `-0.0`. `Num::add` and `sub`
+  short-circuit an exact zero operand rather than promoting it to `0.0`, and the `ADDI`
+  peephole never takes a zero immediate.
 
 ### Value and GC invariants (M1)
 
@@ -204,6 +254,12 @@ implementation targeting the register VM described in `ruse-bytecode-spec.md`.
   `tests/snapshots/`). After an intentional output change, regenerate with
   `INSTA_UPDATE=always cargo test --test disasm` and review the diff; snapshots are
   committed, so CI and `nix build` fail on drift
+- The numeric tower has a non-gating differential against `chibi-scheme`
+  (`tests/chibi_diff.rs`). It is `#[ignore]`d and returns early unless `RUSE_CHIBI` is
+  set; inside `nix develop`, where `chibi` is on `PATH`, run
+  `RUSE_CHIBI=1 cargo test --test chibi_diff -- --ignored --nocapture`. A disagreement
+  that no `DIVERGENCES` entry covers is either a ruse bug or a divergence still to be
+  justified. CI runs it as an advisory job that never gates a merge
 
 ### Code Quality
 - `cargo clippy` - Run linting (clippy available in dev environment)
@@ -246,12 +302,17 @@ silences the advisory; do not "fix" it by reaching for strict provenance.
 Several tests are Miri-aware: the long-list/deep-chain tests in `gc`, `rt::equal` and
 `rt::write` shrink their sizes under `cfg!(miri)` (the full sizes would take hours
 interpreted), and the test that deliberately `mem::forget`s a pin scope is
-`#[cfg_attr(miri, ignore)]` because Miri's leak checker is correct to flag it.
+`#[cfg_attr(miri, ignore)]` because Miri's leak checker is correct to flag it. Four
+`num::transcend` tests are ignored too: Miri perturbs the results of float transcendentals
+(`-Zmiri-deterministic-floats` is not in use), so bitwise assertions on `sin`, `exp` or
+`acosh` outputs cannot hold under it. The at-cap `#e1e100000` parse test is ignored
+because interpreted it takes minutes.
 
 ### Nix Integration
 - `nix develop` - Enter development shell with all dependencies
 - `nix build` - Build the project using Nix
-- Development shell includes: Rust toolchain, clippy, rust-analyzer, cargo-nextest
+- Development shell includes: Rust toolchain, clippy, rust-analyzer, cargo-nextest,
+  chibi-scheme (for the numeric differential)
 
 ## R7RS Implementation Notes
 
