@@ -25,7 +25,7 @@ Verified against the working tree, not against the roadmap's own claims.
 
 - =src/lexer.rs= (752 loc), =src/parser.rs= (576), =src/ast.rs= (184), =src/span.rs= (130) —
   a span-carrying reader with miette diagnostics.
-- =src/value/= — the NaN-boxed ~Value~, the ~repr(C)~ heap objects (now including
+- =src/value/= — the NaN-boxed ~Value~, the ~repr(C)~ heap objects (including
   ~Closure~, ~NativeProc~, ~Ratnum~ and ~Compnum~), and =layout.rs=, the single home for
   every mask, tag and field offset (M1, extended in M3 and M5).
 - =src/num/= — the numeric tower (M5): ~Num~, a heap-free enum over ~BigInt~,
@@ -107,7 +107,7 @@ Ratified previously and unchanged. See [[file:ROADMAP.md][ROADMAP.md]] for the f
 | A | ~Value~ is ~repr(transparent) struct Value(u64)~, NaN-boxed: immediate flonums, 48-bit fixnums, chars, 6 singletons, one heap-pointer tag. Hardware NaNs canonicalized to a fixed non-signature pattern |
 | B | GC is precise, non-moving, stop-the-world tri-color mark-sweep, ~Drop~-on-sweep. Write barriers emitted as no-ops from day one |
 | C | Compiler is direct syntax-directed codegen (destination-register + tail-flag descent) over a typed Core IR, with a Lua-5 ~FuncState~ register allocator. No CPS, no ANF |
-| D | Numeric tower on ~num-bigint~/~num-rational~/~num-integer~/~num-traits~. 48-bit fixnum with centralized promote/demote |
+| D | Numeric tower on ~num-bigint~/~num-rational~/~num-complex~/~num-integer~/~num-traits~. 48-bit fixnum with centralized promote/demote |
 | E | Hygiene via Flatt scope-sets; a ~Syntax~ type designed *before* the expander. An unhygienic gensym-rename prototype lands first |
 | F | One ~Continuation~ heap object, callable. Escape-only capture first, then upgraded in place to multi-shot via whole-stack copy |
 | G | Stdlib in 3 layers: opcode-backed prims, a ~PRIMCALL~ native-fn table, and a baked-in =prelude.scm=. Every prim is *also* a global-slot procedure |
@@ -555,10 +555,13 @@ new numeric natives (93 primitives in all). The suite driver's ratchet rises fro
 reads ~tests: 333 passed, 2 failed~, the same two M7-collateral failures as before. The
 non-gating proptest differential against chibi-scheme runs 300 cases: 267 agree, 29 are
 excused by documented divergences, 4 are skipped because chibi itself crashed, and none
-fail; a 20000-case survey classified every disagreement it found. Under
-~cargo nextest run --all-targets~ 255 tests pass and one (the ignored differential) is
-skipped; clippy ~-D warnings~ and fmt are clean, Miri is green under both aliasing models
-with five lib tests ignored, and ~nix build~ is green. ~floor/~, ~truncate/~ and
+fail; a 20000-case survey classified every disagreement it found but one,
+~(cos (acos 1.23e38-379i))~, left unexcused on purpose because the deferred complex
+square root bounds ~acos~'s precision there, so the advisory job can occasionally go red
+(about one case in 15000). Under ~cargo nextest run --all-targets~ 255 tests pass and one
+(the ignored differential) is skipped; clippy ~-D warnings~ and fmt are clean, Miri is
+green under both aliasing models with six lib tests ignored (five numeric ones plus the
+pin-scope test), and ~nix build~ is green. ~floor/~, ~truncate/~ and
 ~exact-integer-sqrt~ stay out until M7 gives them multiple values to return.
 
 - [X] Tower types: bignum, gcd-normalized rational, flonum incl. ±inf/NaN, exact and
@@ -580,8 +583,8 @@ with five lib tests ignored, and ~nix build~ is green. ~floor/~, ~truncate/~ and
   exact-zero imaginary part collapses to the real part, every NaN is ~f64::NAN~'s bits),
   which lets the structural, bitwise ~PartialEq~ mean representation equality; numeric
   ~=~ is ~Num::num_eq~. Every precondition the crates assert on (a zero denominator, a
-  negative radix, ~0 ** -n~) is guarded in =src/num/= and surfaces as a ~NumError~, so
-  nothing there panics on user data.
+  radix outside 2, 8, 10 and 16, ~0 ** -n~) is guarded in =src/num/= and surfaces as a
+  ~NumError~, so nothing there panics on user data.
 - *Boxing has one door.* Heap tags ~Ratnum = 11~ and ~Compnum = 12~ are additive;
   ~Heap::number~ is the only place a ~Num~ becomes a ~Value~, and ~rt::arith::unbox~ is
   its inverse. ~unary~ and ~binary~ carry unbox→compute→box for every opcode slow path and

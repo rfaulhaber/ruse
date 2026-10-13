@@ -111,11 +111,11 @@ collections happen only at the dispatch loop's safepoint with the frame windows 
 open-upvalue list as the root set. M5 adds the tower in `src/num/`: bignums, reduced
 rationals, flonums with ±inf/NaN, and exact and inexact complex numbers, read through the
 whole §7.1.1 literal grammar (radix and exactness prefixes, rationals, decimals, polar and
-rectangular complex), computed with exact/inexact contagion and printed in any radix. The
-56 numeric natives cover R7RS §6.2.6 except `floor/`, `truncate/` and
-`exact-integer-sqrt`, which return multiple values. Still to come: reader breadth (M6),
-first-class control and multiple values (M7), hygienic macros and libraries (M8),
-stdlib/ports/conformance (M9). Opcodes owned by those milestones execute as typed
+rectangular complex), computed with exact/inexact contagion and printed in radix 2, 8, 10
+or 16 (inexact numbers in radix 10 only). The 56 numeric natives cover R7RS §6.2.6 except
+`floor/`, `truncate/` and `exact-integer-sqrt`, which return multiple values. Still to
+come: reader breadth (M6), first-class control and multiple values (M7), hygienic macros
+and libraries (M8), stdlib/ports/conformance (M9). Opcodes owned by those milestones execute as typed
 `Unimplemented` errors, never `unreachable!`. The goal is a bytecode-compiled R7RS
 implementation targeting the register VM described in `ruse-bytecode-spec.md`.
 
@@ -199,17 +199,18 @@ implementation targeting the register VM described in `ruse-bytecode-spec.md`.
 ### Numeric tower invariants (M5)
 
 - **`Heap::number` is the one place a `Num` becomes a `Value`**, and `rt::arith::unbox` the
-  one way back. The fast paths hand fixnum results to `Heap::integer`/`integer_from_big`,
-  which `Heap::number` uses too, so the fixnum/bignum boundary has a single owner and no
-  other code allocates a `Bignum`, `Ratnum` or `Compnum`.
-- **`Num` constructors canonicalise; never build a variant directly.** `Num::rational`,
-  `from_ratio`, `rectangular` and `inexact_complex` collapse a ratio over 1 to `Int`, an
-  exact-zero imaginary part to a real, and every NaN to `f64::NAN`'s bits. The structural,
-  bitwise `PartialEq` and the heap representation both rely on it.
+  one way back. It boxes an `Int` through `Heap::integer_from_big`, which demotes to a
+  fixnum whenever the integer fits (the fast paths use `Heap::integer` for the same
+  reason); `eqv?` and the fast paths key on that canonical representation, and no code
+  outside `Heap` allocates a `Bignum`, `Ratnum` or `Compnum`.
+- **`Num` constructors canonicalise; never build a variant directly.** `Num::rational` and
+  `from_ratio` collapse a ratio over 1 to `Int`, `rectangular` collapses an exact-zero
+  imaginary part to a real, and `flo` and `inexact_complex` map every NaN to `f64::NAN`'s
+  bits. The structural, bitwise `PartialEq` and the heap representation both rely on it.
 - **Crate preconditions are guarded in `src/num/`.** The `num-*` crates assert on a zero
-  denominator, a negative radix, `0 ** -n`; each is checked first and surfaces as a
-  `NumError`, so no user datum reaches a crate panic. `num-bigint` stays at 0.4, the
-  release `num-rational` pairs with.
+  denominator, a radix outside 2, 8, 10 and 16, `0 ** -n`; each is checked first and
+  surfaces as a `NumError`, so no user datum reaches a crate panic. `num-bigint` stays at
+  0.4, the release `num-rational` pairs with.
 - **One signed-zero convention.** A ±0.0 imaginary part is the real axis for `sqrt`,
   `asin` and `acos`, whatever its sign; `atan` follows `num-complex`'s cut, a recorded
   deviation.

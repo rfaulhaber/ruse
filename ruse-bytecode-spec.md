@@ -16,7 +16,7 @@ This document specifies the instruction set architecture (ISA) for the Ruse VM. 
 
 2. **Only `#f` is false.** Scheme's truthiness is trivial compared to Lua's (`nil` and `false`). The `TEST` family compares against a single immediate bit pattern — one branch, no type dispatch.
 
-3. **Fixnum fast path, tower slow path.** Arithmetic opcodes check both operands for the fixnum tag (a single mask-and-compare under NaN-boxing), execute inline if both match, and otherwise call out to the numeric tower runtime (bignums, rationals, flonums, complex). The bytecode never encodes numeric representation — that is a runtime property of the values.
+3. **Fixnum fast path, tower slow path.** Arithmetic opcodes check both operands for the fixnum tag (a single mask-and-compare under NaN-boxing), answer on the fast path inside the runtime function if both match, and otherwise call out to the numeric tower runtime (bignums, rationals, flonums, complex). The bytecode never encodes numeric representation — that is a runtime property of the values.
 
 4. **Multiple values are first-class in the calling convention, not bolted on.** `values` and `call-with-values` compile to ordinary `RETURN`/`CALL` instructions using open-ended operand counts (the Lua `B=0`/`C=0` trick). No separate MV register file, no MV opcodes.
 
