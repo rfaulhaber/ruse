@@ -903,7 +903,11 @@ impl Compiler<'_> {
             ("+", [x, y]) if addi_immediate(x).is_some() => {
                 self.emit_addi(y, addi_immediate(x), dst, span)?;
             }
-            ("-", [x, y]) if addi_immediate(y).and_then(|k| k.checked_neg()).is_some() => {
+            // Not for a zero subtrahend: `ADDI` would add 0.0 to a flonum, which turns -0.0
+            // into 0.0, where subtracting 0.0 leaves it alone.
+            ("-", [x, y])
+                if addi_immediate(y).is_some_and(|k| k != 0 && k.checked_neg().is_some()) =>
+            {
                 self.emit_addi(
                     x,
                     addi_immediate(y).and_then(|k| k.checked_neg()),

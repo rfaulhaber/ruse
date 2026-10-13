@@ -102,3 +102,22 @@ jobs:
 
       - name: Rustfmt
         run: cargo fmt --all -- --check
+
+  # Advisory: runs the numeric tower against chibi-scheme on random expressions. It never
+  # gates a merge, because the chibi-scheme Ubuntu ships is not the 0.12 the dev shell pins
+  # and its answers, bugs and crashes differ between releases.
+  chibi-diff:
+    name: Differential vs chibi
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install chibi-scheme
+        run: sudo apt-get update && sudo apt-get install -y chibi-scheme
+
+      - name: Differential test
+        run: cargo test --test chibi_diff -- --ignored
+        env:
+          RUSE_CHIBI: "1"

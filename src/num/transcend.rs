@@ -21,7 +21,7 @@
 //!   answers `+nan.0`.
 
 use std::cmp::Ordering;
-use std::f64::consts::PI;
+use std::f64::consts::{FRAC_PI_2, LN_2, PI};
 
 use num_traits::{Signed, ToPrimitive, Zero};
 
@@ -56,15 +56,15 @@ impl Num {
     }
 
     pub fn tan(&self) -> Num {
-        self.transcendental(f64::tan, Complex::tan)
+        self.transcendental(f64::tan, complex_tan)
     }
 
     pub fn asin(&self) -> Num {
-        self.arc(f64::asin, Complex::asin)
+        self.arc(f64::asin, asin_beyond_unit, Complex::asin)
     }
 
     pub fn acos(&self) -> Num {
-        self.arc(f64::acos, Complex::acos)
+        self.arc(f64::acos, acos_beyond_unit, Complex::acos)
     }
 
     pub fn atan(&self) -> Num {
@@ -184,10 +184,15 @@ impl Num {
     }
 
     /// As [`Num::transcendental`] for `asin` and `acos`, which leave the reals for an
-    /// argument outside `[-1, 1]`.
-    fn arc(&self, real: fn(f64) -> f64, complex: fn(Complex<f64>) -> Complex<f64>) -> Num {
+    /// argument outside `[-1, 1]`; `beyond` answers that case.
+    fn arc(
+        &self,
+        real: fn(f64) -> f64,
+        beyond: fn(f64) -> Complex<f64>,
+        complex: fn(Complex<f64>) -> Complex<f64>,
+    ) -> Num {
         match self.to_f64() {
-            Some(x) if x.abs() > 1.0 => Num::inexact_complex(complex(Complex::new(x, 0.0))),
+            Some(x) if x.abs() > 1.0 => Num::inexact_complex(beyond(x)),
             _ => self.transcendental(real, complex),
         }
     }
@@ -252,6 +257,44 @@ fn complex_sqrt(mut z: Complex<f64>) -> Num {
     Num::inexact_complex(z.sqrt())
 }
 
+/// `asin` of a real outside `[-1, 1]` in closed form, with the imaginary part negative for a
+/// positive argument as `(asin 2)` has it. `Complex::asin` evaluates
+/// `-i ln(iz + sqrt(1 - z²))`, whose terms cancel to a NaN real part for a large negative `z`.
+fn asin_beyond_unit(x: f64) -> Complex<f64> {
+    Complex::new(FRAC_PI_2.copysign(x), -acosh(x.abs()).copysign(x))
+}
+
+/// `acos` of a real outside `[-1, 1]`, as `π/2 - asin`. `Complex::acos` cancels `z` against
+/// `i sqrt(1 - z²)` and loses every digit of the imaginary part for `|z|` near `1e8`.
+fn acos_beyond_unit(x: f64) -> Complex<f64> {
+    let asin = asin_beyond_unit(x);
+    Complex::new(FRAC_PI_2 - asin.re, -asin.im)
+}
+
+/// `f64::acosh` for `x >= 1`, which overflows summing `x` with itself above `9e307`; from
+/// `2^28` up `ln(2x)` is already correctly rounded.
+fn acosh(x: f64) -> f64 {
+    if x > 268_435_456.0 {
+        x.ln() + LN_2
+    } else {
+        x.acosh()
+    }
+}
+
+/// `Complex::tan` divides `sinh(2y)` by `cosh(2y)`, which overflow together from `|y|` of
+/// about 355 and make a NaN. From `|y|` of 20 the quotient is `±i` to within `e^-40`, and the
+/// real part is `2 sin(2x) e^(-2|y|)`.
+fn complex_tan(z: Complex<f64>) -> Complex<f64> {
+    if z.im.abs() >= 20.0 {
+        Complex::new(
+            2.0 * (2.0 * z.re).sin() * (-2.0 * z.im.abs()).exp(),
+            z.im.signum(),
+        )
+    } else {
+        z.tan()
+    }
+}
+
 /// Whether `base.powf(power)` is the answer. It is NaN for a negative base and a
 /// fractional exponent, where the principal value is complex.
 fn has_real_power(base: f64, power: f64) -> bool {
@@ -272,7 +315,10 @@ mod tests {
         Num::rectangular(&re, &im).unwrap()
     }
 
+    // Miri perturbs every transcendental `f64` result by a few ulps, and this test asserts
+    // exact floats.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn exact_results_where_the_design_promises_them() {
         assert_eq!(Num::int(4).sqrt(), Num::int(2));
         assert_eq!(r(1, 4).sqrt(), r(1, 2));
@@ -309,7 +355,10 @@ mod tests {
         ));
     }
 
+    // Miri perturbs every transcendental `f64` result by a few ulps, and this test asserts
+    // exact floats.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn transcendentals_promote_to_complex_when_the_real_answer_does_not_exist() {
         assert!(matches!(
             Num::int(-1).log(),
@@ -327,6 +376,51 @@ mod tests {
         );
         assert_eq!(Num::int(0).exp(), Num::flo(1.0));
         assert_eq!(Num::flo(0.0).sin(), Num::flo(0.0));
+    }
+
+    #[test]
+    fn asin_and_acos_beyond_the_unit_interval_follow_one_branch_at_any_magnitude() {
+        for x in [1.5, 2.0, 742.0, 1e3, -1.5, -2.0, -742.0, -1e3] {
+            let library = Complex::new(x, 0.0);
+            // The library loses digits to cancellation as |x| grows; the branch is what is
+            // being compared.
+            assert!((asin_beyond_unit(x) - library.asin()).norm() <= 1e-6);
+            assert!((acos_beyond_unit(x) - library.acos()).norm() <= 1e-6);
+        }
+        // `ln` is the one transcendental call, and Miri perturbs it by a few ulps.
+        let near = |actual: Num, re: f64, im: f64| match actual {
+            Num::InexactComplex(z) => (z.re - re).abs() < 1e-9 && (z.im - im).abs() < 1e-9,
+            _ => false,
+        };
+        let lift = 46.74484904044086;
+        assert!(near(Num::flo(1e20).asin(), FRAC_PI_2, -lift));
+        assert!(near(Num::flo(-1e20).asin(), -FRAC_PI_2, lift));
+        assert!(near(Num::flo(1e20).acos(), 0.0, lift));
+        assert!(near(Num::flo(-1e20).acos(), PI, -lift));
+        assert_eq!(
+            Num::flo(f64::INFINITY).asin(),
+            c(Num::flo(FRAC_PI_2), Num::flo(f64::NEG_INFINITY))
+        );
+        assert_eq!(
+            Num::flo(f64::INFINITY).acos(),
+            c(Num::flo(0.0), Num::flo(f64::INFINITY))
+        );
+        assert_eq!(Num::flo(f64::NAN).asin(), Num::flo(f64::NAN));
+        assert!(acosh(1e308).is_finite());
+    }
+
+    #[test]
+    fn tan_saturates_to_plus_or_minus_i_instead_of_overflowing_to_nan() {
+        for im in [30.0, 718.0, f64::INFINITY] {
+            for (re, im, expected) in [(-913.0, -im, -1.0), (1.0, im, 1.0)] {
+                assert!(matches!(
+                    c(Num::flo(re), Num::flo(im)).tan(),
+                    Num::InexactComplex(z) if z.re.abs() < 1e-12 && z.im == expected
+                ));
+            }
+        }
+        let moderate = c(Num::flo(1.0), Num::flo(19.0));
+        assert!(matches!(moderate.tan(), Num::InexactComplex(z) if (z.im - 1.0).abs() < 1e-12));
     }
 
     #[test]
@@ -352,7 +446,10 @@ mod tests {
         assert_eq!(Num::parse("1@", 10), None);
     }
 
+    // Miri perturbs every transcendental `f64` result by a few ulps, and this test asserts
+    // exact floats.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn exact_complex_powers_and_the_remaining_edges() {
         let z = c(Num::int(1), Num::int(2));
         assert_eq!(z.expt(&Num::int(2)), Ok(c(Num::int(-3), Num::int(4))));

@@ -19,6 +19,8 @@ thiserror = "2"
 # Disassembly is tested as snapshot text, never as raw bytes, so the opcode byte table
 # stays cheap to renumber (frozen decision; see docs/project_plan.org).
 insta = "1"
+# Serves only the ignored, non-gating differential test against chibi-scheme.
+proptest = "1"
 
 # Unsafe is denied for the whole package and re-enabled, file by file, only where it is
 # unavoidable: `src/gc/mod.rs` (the collector), `src/gc/trace.rs` (the grey worklist),

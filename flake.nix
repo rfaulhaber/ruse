@@ -94,6 +94,7 @@
             rust-analyzer
             cargo-nextest
             cargo-release
+            chibi
           ];
         };
       };
