@@ -172,11 +172,12 @@ implementation targeting the register VM described in `ruse-bytecode-spec.md`.
   while nothing serializes bytecode.
 - **Errors are values**: every failure path in the VM, the runtime and the natives is a
   typed `VmErrorKind` (spans attached from `Proto.spans` at the faulting instruction).
-  A numeric failure is `DivisionByZero` (an exact zero divisor) or `NumericDomain` (an
-  argument outside the function's domain), both mapped from `NumError` by
-  `rt::arith::num_err`. Milestone-future opcodes return `Unimplemented`; a broken VM
-  invariant returns `Internal` and says it is a ruse bug. No `unwrap`, no `unreachable!` —
-  the lint wall makes this a build property.
+  A numeric failure is `DivisionByZero` (an exact zero divisor of `/`, or a zero divisor of
+  either exactness for `quotient`/`remainder`/`modulo`; a flonum zero divides the IEEE way
+  only under `/`) or `NumericDomain` (an argument outside the function's domain), both
+  mapped from `NumError` by `rt::arith::num_err`. Milestone-future opcodes return
+  `Unimplemented`; a broken VM invariant returns `Internal` and says it is a ruse bug. No
+  `unwrap`, no `unreachable!` — the lint wall makes this a build property.
 
 ### Upvalue invariants (M4)
 
@@ -203,17 +204,18 @@ implementation targeting the register VM described in `ruse-bytecode-spec.md`.
   fixnum whenever the integer fits (the fast paths use `Heap::integer` for the same
   reason); `eqv?` and the fast paths key on that canonical representation, and no code
   outside `Heap` allocates a `Bignum`, `Ratnum` or `Compnum`.
-- **`Num` constructors canonicalise; never build a variant directly.** `Num::rational` and
-  `from_ratio` collapse a ratio over 1 to `Int`, `rectangular` collapses an exact-zero
-  imaginary part to a real, and `flo` and `inexact_complex` map every NaN to `f64::NAN`'s
-  bits. The structural, bitwise `PartialEq` and the heap representation both rely on it.
+- **`Num` constructors canonicalise; only `src/num/` and `rt::arith::unbox` build a variant
+  directly.** `Num::rational` and `from_ratio` collapse a ratio over 1 to `Int`,
+  `rectangular` collapses an exact-zero imaginary part to a real, and `flo` and
+  `inexact_complex` map every NaN to `f64::NAN`'s bits. The structural, bitwise `PartialEq`
+  and the heap representation both rely on it.
 - **Crate preconditions are guarded in `src/num/`.** The `num-*` crates assert on a zero
-  denominator, a radix outside 2, 8, 10 and 16, `0 ** -n`; each is checked first and
-  surfaces as a `NumError`, so no user datum reaches a crate panic. `num-bigint` stays at
-  0.4, the release `num-rational` pairs with.
-- **One signed-zero convention.** A ±0.0 imaginary part is the real axis for `sqrt`,
-  `asin` and `acos`, whatever its sign; `atan` follows `num-complex`'s cut, a recorded
-  deviation.
+  denominator, a radix outside 2..=36, `0 ** -n`; each is checked first and surfaces as a
+  `NumError`, so no user datum reaches a crate panic. Ruse itself restricts a radix to 2, 8,
+  10 and 16. `num-bigint` stays at 0.4, the release `num-rational` pairs with.
+- **One signed-zero convention.** A ±0.0 imaginary part is the real axis for `sqrt`, and
+  for `asin` and `acos` where |re| > 1, whatever its sign (on [-1, 1] Kahan's forms run and
+  keep it); `atan` follows `num-complex`'s cut, a recorded deviation.
 - **An exact zero is the additive identity**: `(+ -0.0 0)` is `-0.0`. `Num::add` and `sub`
   short-circuit an exact zero operand rather than promoting it to `0.0`, and the `ADDI`
   peephole never takes a zero immediate.

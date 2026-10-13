@@ -6,6 +6,14 @@
 //! to `Complex<f64>`. `sqrt` stays exact for an exact real whose root is a ratio of integers,
 //! and `expt` for an exact base under an exact integer exponent; `(expt 4 1/2)` is `2.0`.
 //!
+//! An exact real beyond the double range is scaled to `m · 2^k` before it is converted, so
+//! that an answer which fits survives an argument which does not: `(log (expt 3 1000))` is
+//! `1098.61...`, not `+inf.0`. That covers `log`, the inexact `sqrt`, `expt` under a real
+//! exponent, the two-argument `atan`, and `angle` and `magnitude` of an exact complex; every
+//! other function converts its argument directly. `sin`, `cos` and `tan` of an exact number
+//! above 2^53 stay inexact noise however it is converted, because one ulp of the argument
+//! exceeds 2π.
+//!
 //! Where R7RS leaves a result open this module follows chibi: `(log 0)` is `-inf.0`,
 //! `(angle +inf.0)` is `0.0`, `(angle -0.0)` is `π` as the signed zero of `atan2` says, and
 //! `sqrt` takes the principal branch whatever the sign of a zero imaginary part. The
@@ -13,25 +21,29 @@
 //!
 //! - An exact complex base under an exact integer exponent stays exact: `(expt 1+2i 2)` is
 //!   `-3+4i`, where chibi answers with a flonum complex.
-//! - An exact zero base under a positive exponent is an exact zero, `(expt 0 1/2)` included.
+//! - An exact zero base under a positive exponent is a zero of the exponent's exactness,
+//!   `(expt 0 1/2)` included: `0`, but `(expt 0 1.0)` is `0.0`.
 //! - An exact zero base under a negative exponent is an error, `(expt 0 -1.0)` included
 //!   (R7RS §6.2.6), as an exact zero divisor is everywhere. An inexact zero base keeps
 //!   IEEE: `(expt 0.0 -1)` is `+inf.0`.
 //! - A negative base under a fractional exponent is complex: `(expt -8 1/3)`, where chibi
 //!   answers `+nan.0`.
-//! - `asin` and `acos` ignore the sign of a zero imaginary part, as `sqrt` does, so
-//!   `(asin 2.0+0.0i)`, `(asin 2.0-0.0i)` and `(asin 2.0)` agree, on the side of the cut that
-//!   is continuous with the fourth quadrant above 1 and with the second below -1. `atan` still
-//!   follows num-complex, which ignores the sign of a zero *real* part on its cuts instead:
-//!   `(atan 0.0-2.0i)` and `(atan -0.0-2.0i)` both answer `-π/2`, where chibi and C99 answer
-//!   `+π/2` and `-π/2`. That deviation is recorded in `tests/chibi_diff.rs`.
+//! - `asin` and `acos` ignore the sign of a zero imaginary part where the real part lies
+//!   beyond 1 in magnitude, as `sqrt` does, so `(asin 2.0+0.0i)`, `(asin 2.0-0.0i)` and
+//!   `(asin 2.0)` agree, on the side of the cut that is continuous with the fourth quadrant
+//!   above 1 and with the second below -1. Within [-1, 1] Kahan's formulas run and keep the
+//!   sign of the zero. `atan` follows num-complex, which ignores the sign of a zero *real*
+//!   part on its cuts instead: `(atan 0.0-2.0i)` and `(atan -0.0-2.0i)` both answer `-π/2`,
+//!   where chibi and C99 answer `+π/2` and `-π/2`. That deviation is recorded in
+//!   `tests/chibi_diff.rs`.
 
 use std::cmp::Ordering;
 use std::f64::consts::{FRAC_PI_2, LN_2, PI};
 
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_integer::Integer;
+use num_traits::{One, Signed, ToPrimitive, Zero};
 
-use super::{BigInt, BigRational, Complex, Num, NumError, NumResult};
+use super::{BigInt, BigRational, Complex, Num, NumError, NumResult, int_to_f64, ratio_to_f64};
 
 impl Num {
     pub fn exp(&self) -> Num {
@@ -41,9 +53,9 @@ impl Num {
     /// The natural logarithm. `(log 0)` is `-inf.0`; a negative real has the complex
     /// logarithm `ln|x| + πi`, where `f64::ln` would give NaN.
     pub fn log(&self) -> NumResult {
-        Ok(match self.to_f64() {
-            Some(x) if x < 0.0 => Num::inexact_complex(Complex::new(x, 0.0).ln()),
-            Some(x) => Num::flo(x.ln()),
+        Ok(match self.to_scaled_f64() {
+            Some((m, k)) if m < 0.0 => Num::inexact_complex(Complex::new(ln_scaled(-m, k), PI)),
+            Some((m, k)) => Num::flo(ln_scaled(m, k)),
             None => Num::inexact_complex(self.to_inexact_complex().ln()),
         })
     }
@@ -80,8 +92,11 @@ impl Num {
     /// `(atan y x)`, defined on reals only. The signs of the operands, zeros included, pick
     /// the quadrant: `(atan -0.0 -1.0)` is `-π`.
     pub fn atan2(&self, x: &Num) -> NumResult {
-        match (self.to_f64(), x.to_f64()) {
-            (Some(y), Some(x)) => Ok(Num::flo(y.atan2(x))),
+        match (self.to_scaled_f64(), x.to_scaled_f64()) {
+            (Some(y), Some(x)) => {
+                let (y, x) = common_scale(y, x);
+                Ok(Num::flo(y.atan2(x)))
+            }
             _ => Err(NumError::NotReal),
         }
     }
@@ -99,9 +114,22 @@ impl Num {
                 Num::from_ratio(root)
             };
         }
-        match self.to_f64() {
-            Some(x) if x < 0.0 => complex_sqrt(Complex::new(x, 0.0)),
-            Some(x) => Num::flo(x.sqrt()),
+        self.inexact_sqrt()
+    }
+
+    /// `sqrt` on `f64`. An exact real is scaled first, so a root that fits survives a
+    /// radicand that does not: `(sqrt (expt 3 1001))`.
+    fn inexact_sqrt(&self) -> Num {
+        match self.to_scaled_f64() {
+            Some((m, k)) => {
+                // A power of two has a power-of-two root only when the exponent is even.
+                let (m, k) = if k % 2 == 0 { (m, k) } else { (m * 2.0, k - 1) };
+                if m < 0.0 {
+                    Num::inexact_complex(Complex::new(0.0, scale_pow2((-m).sqrt(), k / 2)))
+                } else {
+                    Num::flo(scale_pow2(m.sqrt(), k / 2))
+                }
+            }
             None => complex_sqrt(self.to_inexact_complex()),
         }
     }
@@ -130,6 +158,14 @@ impl Num {
                 _ => {}
             }
         }
+        // `powf` of a base beyond the double range would saturate, so the power goes through
+        // the logarithm of the scaled base instead. A negative base takes the complex path.
+        if let (Some((m, k)), Some(power)) = (self.to_scaled_f64(), e.to_f64())
+            && k != 0
+            && m > 0.0
+        {
+            return Ok(Num::flo((power * ln_scaled(m, k)).exp()));
+        }
         match (self.to_f64(), e.to_f64()) {
             (Some(base), Some(power)) if has_real_power(base, power) => {
                 Ok(Num::flo(base.powf(power)))
@@ -155,7 +191,7 @@ impl Num {
         match self {
             Num::ExactComplex(z) => match exact_ratio_root(&z.norm_sqr()) {
                 Some(root) => Num::from_ratio(root),
-                None => Num::flo(self.to_inexact_complex().norm()),
+                None => Num::from_ratio(z.norm_sqr()).inexact_sqrt(),
             },
             Num::InexactComplex(z) => Num::flo(z.norm()),
             // `abs` accepts every real; the fallback only keeps the match total.
@@ -171,9 +207,24 @@ impl Num {
             Num::Int(_) | Num::Rat(_) if self.sign() == Ok(Some(Ordering::Less)) => Num::flo(PI),
             Num::Int(_) | Num::Rat(_) => Num::int(0),
             Num::Flo(x) => Num::flo(0.0f64.atan2(*x)),
-            Num::ExactComplex(_) | Num::InexactComplex(_) => {
-                Num::flo(self.to_inexact_complex().arg())
+            Num::ExactComplex(z) => {
+                let (im, re) = common_scale(scaled_ratio(&z.im), scaled_ratio(&z.re));
+                Num::flo(im.atan2(re))
             }
+            Num::InexactComplex(z) => Num::flo(z.arg()),
+        }
+    }
+
+    /// A real as `(m, k)` with the value `m · 2^k`, for a function whose argument may lie
+    /// beyond the double range. A value the format holds converts as [`Num::to_f64`] does,
+    /// with `k` zero; an exact value beyond it keeps its leading bits in `m`, far from either
+    /// end of the range, and the rest in `k`. `None` for a complex.
+    fn to_scaled_f64(&self) -> Option<(f64, i64)> {
+        match self {
+            Num::Int(i) => Some(scaled_int(i)),
+            Num::Rat(r) => Some(scaled_ratio(r)),
+            Num::Flo(x) => Some((*x, 0)),
+            Num::ExactComplex(_) | Num::InexactComplex(_) => None,
         }
     }
 
@@ -221,6 +272,12 @@ impl Num {
                 Ok(self.clone())
             };
         }
+        // A unit base has one of two answers for any exponent, however large.
+        if let Num::Int(b) = self
+            && b.magnitude().is_one()
+        {
+            return Ok(Num::int(if b.is_negative() && n.is_odd() { -1 } else { 1 }));
+        }
         // The crates take the exponent as a `u32`, and a larger power is not computed.
         let power = n.magnitude().to_u32().ok_or(NumError::Domain)?;
         let positive = match self {
@@ -256,6 +313,66 @@ fn exact_ratio_root(r: &BigRational) -> Option<BigRational> {
     let denom = perfect_square_root(r.denom())?;
     // A denominator is positive, and so is its root.
     Some(BigRational::new(numer, denom))
+}
+
+/// Bits of an exact value kept when it is scaled into the `f64` range: more than a
+/// mantissa's 53, so the final conversion's rounding is the one that counts.
+const SCALED_BITS: u64 = 60;
+
+/// An integer of fewer bits is below 2^1023, so it converts without saturating.
+const FINITE_INT_BITS: u64 = 1024;
+
+fn scaled_int(i: &BigInt) -> (f64, i64) {
+    if i.bits() < FINITE_INT_BITS {
+        (int_to_f64(i), 0)
+    } else {
+        scale_down(i)
+    }
+}
+
+fn scaled_ratio(r: &BigRational) -> (f64, i64) {
+    let plain = ratio_to_f64(r);
+    // A subnormal keeps too few digits to take a logarithm of.
+    if plain.is_normal() {
+        return (plain, 0);
+    }
+    let ((n, kn), (d, kd)) = (scale_down(r.numer()), scale_down(r.denom()));
+    (n / d, kn - kd)
+}
+
+/// An integer as `(m, k)` with the value `m · 2^k`, where `m` holds its leading
+/// [`SCALED_BITS`] bits. Zero is `(0.0, 0)`.
+fn scale_down(i: &BigInt) -> (f64, i64) {
+    let shift = i.bits().saturating_sub(SCALED_BITS);
+    // The magnitude is shifted and the sign put back, so that `-i` scales to `-m`: a `BigInt`
+    // shift rounds toward negative infinity. The fallback only keeps the conversion total.
+    let m = (i.magnitude() >> shift).to_f64().unwrap_or(f64::NAN);
+    (if i.is_negative() { -m } else { m }, shift as i64)
+}
+
+/// `x · 2^k`. A power of two beyond ±1023 is not a finite double, so the factor is applied in
+/// steps. A finite nonzero `x` is infinite or zero within three of them, which bounds the
+/// loop however large `k` is.
+fn scale_pow2(mut x: f64, mut k: i64) -> f64 {
+    while k != 0 && x != 0.0 && x.is_finite() {
+        let step = k.clamp(-1000, 1000);
+        x *= 2f64.powi(step as i32);
+        k -= step;
+    }
+    x
+}
+
+/// `ln(m · 2^k)`.
+fn ln_scaled(m: f64, k: i64) -> f64 {
+    m.ln() + k as f64 * LN_2
+}
+
+/// Two scaled reals as doubles in one scale, for a function of their ratio such as `atan2`.
+/// The operand with the smaller exponent may underflow to zero, as its share of the ratio
+/// does.
+fn common_scale((a, ka): (f64, i64), (b, kb): (f64, i64)) -> (f64, f64) {
+    let k = ka.max(kb);
+    (scale_pow2(a, ka - k), scale_pow2(b, kb - k))
 }
 
 /// `Complex::sqrt` follows C99 Annex G, where a `-0.0` imaginary part selects the lower
@@ -344,6 +461,21 @@ mod tests {
         Num::rectangular(&re, &im).unwrap()
     }
 
+    fn pow(base: i64, exponent: u32) -> Num {
+        Num::int(BigInt::from(base).pow(exponent))
+    }
+
+    // Miri perturbs each transcendental call by a few ulps, which the tolerance absorbs.
+    fn assert_close(actual: Num, expected: f64) {
+        match actual {
+            Num::Flo(x) => assert!(
+                (x - expected).abs() <= 1e-12 * expected.abs(),
+                "{x} is not within 1e-12 of {expected}"
+            ),
+            other => panic!("expected a flonum near {expected}, got {other:?}"),
+        }
+    }
+
     // Miri perturbs every transcendental `f64` result by a few ulps, and this test asserts
     // exact floats.
     #[test]
@@ -405,6 +537,62 @@ mod tests {
         );
         assert_eq!(Num::int(0).exp(), Num::flo(1.0));
         assert_eq!(Num::flo(0.0).sin(), Num::flo(0.0));
+    }
+
+    #[test]
+    fn a_unit_base_needs_no_computation_whatever_the_exponent() {
+        let huge: BigInt = BigInt::from(1) << 40;
+        let odd: BigInt = &huge + 1;
+        assert_eq!(Num::int(1).expt(&Num::int(4294967296i64)), Ok(Num::int(1)));
+        assert_eq!(Num::int(1).expt(&Num::int(-huge.clone())), Ok(Num::int(1)));
+        assert_eq!(Num::int(-1).expt(&Num::int(huge.clone())), Ok(Num::int(1)));
+        assert_eq!(Num::int(-1).expt(&Num::int(odd.clone())), Ok(Num::int(-1)));
+        assert_eq!(Num::int(-1).expt(&Num::int(-odd)), Ok(Num::int(-1)));
+        assert_eq!(Num::int(0).expt(&Num::int(4294967296i64)), Ok(Num::int(0)));
+    }
+
+    #[test]
+    fn exact_arguments_beyond_the_double_range_scale_before_they_convert() {
+        // Scaling 3^1001 shifts by an odd number of bits and 3^1003 by an even number.
+        assert_close(pow(3, 1000).log().unwrap(), 1098.6122886681098);
+        assert_close(pow(10, 400).log().unwrap(), 400.0 * std::f64::consts::LN_10);
+        let tiny = Num::rational(1.into(), BigInt::from(10).pow(400)).unwrap();
+        assert_close(tiny.log().unwrap(), -400.0 * std::f64::consts::LN_10);
+        assert!(matches!(
+            Num::int(-BigInt::from(3).pow(1000)).log(),
+            Ok(Num::InexactComplex(z))
+                if (z.re - 1098.6122886681098).abs() <= 1e-12 * 1098.6122886681098 && z.im == PI
+        ));
+
+        assert_close(pow(3, 1001).sqrt(), 3f64.powf(500.5));
+        assert_close(pow(3, 1003).sqrt(), 3f64.powf(501.5));
+        let two_over_huge = Num::rational(2.into(), BigInt::from(10).pow(400)).unwrap();
+        assert_close(two_over_huge.sqrt(), 2f64.sqrt() * 1e-200);
+        assert!(matches!(
+            Num::int(-BigInt::from(3).pow(1001)).sqrt(),
+            Num::InexactComplex(z)
+                if z.re == 0.0 && (z.im - 3f64.powf(500.5)).abs() <= 1e-12 * 3f64.powf(500.5)
+        ));
+
+        let quarter = r(1, 4);
+        assert_close(pow(10, 400).expt(&quarter).unwrap(), 1e100);
+        assert_close(pow(10, 400).expt(&Num::flo(0.25)).unwrap(), 1e100);
+        assert_close(tiny.expt(&quarter).unwrap(), 1e-100);
+
+        let (y, x) = (pow(10, 400), Num::int(2).mul(&pow(10, 400)));
+        assert_close(y.atan2(&x).unwrap(), 0.4636476090008061);
+        assert_close(y.neg().atan2(&x.neg()).unwrap(), -PI + 0.4636476090008061);
+        assert_eq!(Num::int(1).atan2(&pow(10, 400)), Ok(Num::flo(0.0)));
+
+        let diagonal = c(pow(10, 400), pow(10, 400));
+        assert_close(diagonal.angle(), PI / 4.0);
+        assert_close(c(pow(10, 400).neg(), pow(10, 400)).angle(), 3.0 * PI / 4.0);
+        // The answer for 10^200 fits a double although its squared norm does not.
+        assert_close(
+            c(pow(10, 200), pow(10, 200)).magnitude(),
+            2f64.sqrt() * 1e200,
+        );
+        assert_eq!(diagonal.magnitude(), Num::flo(f64::INFINITY));
     }
 
     #[test]

@@ -583,8 +583,9 @@ pin-scope test), and ~nix build~ is green. ~floor/~, ~truncate/~ and
   exact-zero imaginary part collapses to the real part, every NaN is ~f64::NAN~'s bits),
   which lets the structural, bitwise ~PartialEq~ mean representation equality; numeric
   ~=~ is ~Num::num_eq~. Every precondition the crates assert on (a zero denominator, a
-  radix outside 2, 8, 10 and 16, ~0 ** -n~) is guarded in =src/num/= and surfaces as a
-  ~NumError~, so nothing there panics on user data.
+  radix outside 2..=36, ~0 ** -n~) is guarded in =src/num/= and surfaces as a
+  ~NumError~, so nothing there panics on user data. Ruse itself restricts a radix to 2, 8,
+  10 and 16.
 - *Boxing has one door.* Heap tags ~Ratnum = 11~ and ~Compnum = 12~ are additive;
   ~Heap::number~ is the only place a ~Num~ becomes a ~Value~, and ~rt::arith::unbox~ is
   its inverse. ~unary~ and ~binary~ carry unbox→compute→box for every opcode slow path and
@@ -614,7 +615,8 @@ pin-scope test), and ~nix build~ is green. ~floor/~, ~truncate/~ and
 - *Zeros.* An exact zero is the additive identity: ~(+ -0.0 0)~ is ~-0.0~, and the ~ADDI~
   peephole never rewrites a zero immediate. The multi-valued functions share one
   signed-zero convention — a ±0.0 imaginary part is treated as the real axis for ~sqrt~,
-  ~asin~ and ~acos~, whatever its sign. ~atan~ still follows ~num-complex~'s branch cut,
+  and for ~asin~ and ~acos~ where |re| > 1, whatever its sign (on [-1, 1] Kahan's forms
+  run and keep it). ~atan~ still follows ~num-complex~'s branch cut,
   a recorded deviation from C99, chibi and Python's ~cmath~, which pick the side from the
   sign of the zero.
 - *Transcendentals are always inexact* except where the exact answer is a perfect power:
@@ -857,9 +859,9 @@ postdates a working sequential VM. The spec's deferred flonum-specialized opcode
       tests them, so the tower carries exact complex (~Complex<BigRational>~) alongside
       inexact
 - [X] *~DIV~ policy* (spec open-Q 4) — resolved in M5: the "divides evenly" fast path
-      earns its branch and is the first statement of ~rt::arith::div~, so the dispatch arm
-      never branches, ~QUOT~ keeps its own integer fast path, and division by an exact
-      zero is ~DivisionByZero~
+      is kept, as the first statement of ~rt::arith::div~, so the dispatch arm never
+      branches (a decision; M10 measures it), ~QUOT~ keeps its own integer fast path, and
+      division by an exact zero is ~DivisionByZero~
 - [X] *Line-info table format* (spec open-Q 5) — provisionally settled in M2:
       ~Proto.spans~ is a per-instruction table of source *byte spans* (empty when debug
       info is stripped), because the reader already produces byte spans and miette

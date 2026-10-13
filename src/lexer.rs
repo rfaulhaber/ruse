@@ -293,7 +293,7 @@ impl Lexer {
     /// Lexes a run that starts like a number. Numeric syntax is too context-dependent to
     /// scan character by character (`1/3`, `+inf.0`, `1e2+3i`, `#x-ff`), so the run is cut
     /// at the next delimiter and classified whole: a number, else a peculiar identifier
-    /// such as `+soup+`, else a malformed number.
+    /// such as `-in` or `+.a`, else a malformed number.
     fn number_or_identifier(&mut self, start_pos: usize) -> Result<Token, LexError> {
         let start_line = self.line;
         let start_column = self.column - 1;
@@ -565,7 +565,7 @@ pub enum LexError {
     },
 
     #[error("Invalid hash syntax '#{character}'")]
-    #[diagnostic(help("Valid hash syntax includes #t, #f, #\\char"))]
+    #[diagnostic(help("Valid hash syntax includes #t, #f, #\\char, #x, #o, #b, #d, #e, #i"))]
     InvalidHashSyntax {
         character: char,
         #[label("invalid hash syntax here")]

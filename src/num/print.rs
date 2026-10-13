@@ -281,6 +281,21 @@ mod tests {
         }
     }
 
+    /// A flonum outside the plain-decimal band prints in exponent form, which must re-read to
+    /// the same flonum.
+    #[test]
+    fn exponent_form_round_trips() {
+        for x in [f64::MAX, f64::MIN_POSITIVE, 5e-324, 1e21, -1e300, 1.5e-11] {
+            let n = Num::flo(x);
+            let back =
+                Num::parse(&n.to_string(), 10).unwrap_or_else(|| panic!("{x:e} printed as {n}"));
+            assert!(n.eqv(&back), "{x:e} printed as {n}, re-read as {back}");
+        }
+        let z = Num::parse("1e21-1e-11i", 10).unwrap();
+        let back = Num::parse(&z.to_string(), 10).unwrap_or_else(|| panic!("printed as {z}"));
+        assert!(z.eqv(&back), "{z} re-read as {back}");
+    }
+
     /// The suite's `test-precision` block: `number->string` must produce one of the accepted spellings.
     #[test]
     fn suite_precision_spellings() {

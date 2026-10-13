@@ -58,8 +58,9 @@ pub enum VmErrorKind {
         expected: &'static str,
         got: &'static str,
     },
-    /// An exact zero divisor reached `/`, `quotient`, `remainder`, `modulo` or one of their
-    /// relatives. A flonum zero divides the IEEE way and never lands here.
+    /// An exact zero divisor reached `/`, or a zero divisor of either exactness reached
+    /// `quotient`, `remainder`, `modulo` or one of their relatives. Only `/` divides a flonum
+    /// zero the IEEE way.
     #[error("{op}: division by zero")]
     DivisionByZero { op: &'static str },
     /// A numeric operation received numbers it still has no answer for: a non-integer

@@ -3,9 +3,9 @@
 //! [`Num`] is heap-free — it owns its integers, ratios and floats directly and never
 //! touches the GC heap — so the lexer, the printer, `eqv?` and the runtime can all call
 //! the same code without a `Heap` in hand. The `num-*` crates assert on inputs they
-//! cannot represent (a zero denominator, a negative radix, `0 ** -n`); every such
+//! cannot represent (a zero denominator, a radix outside 2..=36, `0 ** -n`); every such
 //! precondition is guarded here and surfaces as a [`NumError`], so nothing in this module
-//! can panic on user data.
+//! can panic on user data. Ruse narrows the radix further, to 2, 8, 10 and 16.
 
 mod arith;
 mod integer;

@@ -355,6 +355,6 @@ The capture is described by the child prototype's descriptor table (`u0 <- paren
 1. **`CADR` path encoding** — confirm the C-byte layout (length nibble + direction bits) handles the full `caar`…`cddddr` set (max depth 4 → fits in 4 bits + 4-bit length). It does, but lock the bit layout before the compiler emits it.
 2. **`TYPEP` type enum** — finalize the integer assignments and whether disjoint-type fast checks (pair/null/fixnum) get a branch ahead of the general table lookup.
 3. **Global slot table growth** — REPL redefinition needs slots to be append-only and stable. Decide whether library boundaries get separate slot namespaces.
-4. **`DIV` policy** — resolved in M5: the "divides evenly" fast path earns its branch, as the first statement of `rt::arith::div`, so the dispatch arm never branches; `QUOT` keeps its own integer fast path (see the `DIV` row in §4.2).
+4. **`DIV` policy** — resolved in M5: the "divides evenly" fast path is kept, as the first statement of `rt::arith::div`, so the dispatch arm never branches (a decision, not a measurement; M10 measures it); `QUOT` keeps its own integer fast path (see the `DIV` row in §4.2).
 5. **Line-info table format** — provisionally answered in M2: `Proto.spans` is a per-instruction table of source byte spans (empty when debug info is stripped), because the reader already produces byte spans and miette consumes them directly. A compressed encoding can replace the representation behind that field if it ever matters; revisit before the compiler emits it at scale.
 

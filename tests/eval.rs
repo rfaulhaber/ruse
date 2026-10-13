@@ -853,8 +853,9 @@ fn numeric_errors_are_typed() {
         vm_kind(&eval_err(&mut vm, "(abs 'a)")),
         VmErrorKind::WrongType { op: "abs", .. }
     ));
-    if let RuseError::Vm(e) = eval_err(&mut vm, "(/ 1 0)") {
-        assert!(e.span.is_some());
+    match eval_err(&mut vm, "(/ 1 0)") {
+        RuseError::Vm(e) => assert!(e.span.is_some()),
+        other => panic!("expected a runtime error, got {other}"),
     }
 }
 
@@ -937,4 +938,17 @@ fn transcendental_and_complex_procedures() {
         vm_kind(&eval_err(&mut vm, "(expt 2 4294967296)")),
         VmErrorKind::NumericDomain { op: "expt", .. }
     ));
+}
+
+#[test]
+fn exact_arguments_beyond_the_double_range_keep_representable_answers() {
+    let mut vm = vm();
+    let shown = show(&mut vm, "(log (expt 3 1000))");
+    let value: f64 = shown.parse().unwrap();
+    assert!(
+        (value - 1098.6122886681098).abs() <= 1e-12 * 1098.6122886681098,
+        "{shown}"
+    );
+    assert_eq!(show(&mut vm, "(expt 1 4294967296)"), "1");
+    assert_eq!(show(&mut vm, "(expt -1 (+ (expt 2 40) 1))"), "-1");
 }

@@ -1067,9 +1067,9 @@ fn singleton_ordinal(v: Value) -> Option<u16> {
     .map(|&(_, ordinal)| ordinal as u16)
 }
 
-/// A nonzero literal integer that fits `ADDI`'s signed byte. A zero immediate adds nothing,
-/// and an exact zero is the additive identity (design doc §4), so `(+ x 0)` and `(- x 0)` are
-/// left to the generic opcodes instead of being rewritten.
+/// A nonzero literal integer that fits `ADDI`'s signed byte. An exact zero is the additive
+/// identity, and `ADDI` would turn `-0.0` into `+0.0`, so a zero immediate is never
+/// peepholed: `(+ x 0)` and `(- x 0)` are left to the generic opcodes.
 fn addi_immediate(ir: &Ir) -> Option<i8> {
     match ir {
         Ir::Datum(Expr::Number(Num::Int(i), _)) => i.to_i8().filter(|&k| k != 0),
